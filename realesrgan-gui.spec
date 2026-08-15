@@ -5,7 +5,6 @@ from PyInstaller.utils.hooks import collect_data_files
 a = Analysis(
     ['main.py'],
     datas=[
-        ('theme', 'theme'),
         ('i18n.ini', '.'),
         ('icon-256px.ico', '.'),
         ('icon-128px.png', '.'),
@@ -13,12 +12,8 @@ a = Analysis(
         *((('TaskbarLib.tlb', '.'),) if sys.platform == 'win32' else ()),
         # macOS下通过app实现通知，打包时需要附带
         *collect_data_files('notifypy'),
-    ],
-    hiddenimports=[
-        'PIL._tkinter_finder'
-    ],
-    hookspath=[
-        'pyi-hooks',
+        # qdarktheme 的 QSS/图标等资源
+        *collect_data_files('qdarktheme'),
     ],
     excludes=[
         '_asyncio',
@@ -29,6 +24,7 @@ a = Analysis(
         *(['_multiprocessing'] if sys.platform == 'win32' else []),
         '_queue',
         '_ssl',
+        'tkinter',
         'unicodedata',
     ],
 )
@@ -40,22 +36,6 @@ a.binaries = [
     if not any(x[0].startswith(y) for y in {
         'api-ms-win-',
         'ucrtbase.dll',
-    })
-]
-
-# tcl/tk相关的没有实际使用的大量小文件，在不使用onefile的情况下打包测试，即使不附带这些文件也后不影响运行
-a.datas = [
-    x
-    for x in a.datas
-    if not any(x[0].startswith(y) for y in {
-        os.path.join('tcl', 'encoding'),
-        os.path.join('tcl', 'http'),
-        os.path.join('tcl', 'msgs'),
-        os.path.join('tcl', 'opt'),
-        os.path.join('tcl', 'tzdata'),
-        os.path.join('tcl8'),
-        os.path.join('tk', 'images'),
-        os.path.join('tk', 'msgs'),
     })
 ]
 

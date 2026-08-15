@@ -1,6 +1,5 @@
 import collections
 import configparser
-import ctypes
 import itertools
 import locale
 import notifypy
@@ -10,67 +9,74 @@ import sys
 import tempfile
 import time
 import threading
-import tkinter as tk
 import traceback
 import typing
 import webbrowser
 from PIL import Image
-from PIL import ImageTk
-from tkinter import filedialog
-from tkinter import messagebox
-from tkinter import ttk
-from tkinterdnd2 import DND_FILES
-from tkinterdnd2 import TkinterDnD
+from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont
+from PySide6.QtGui import QIcon
+from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QButtonGroup
+from PySide6.QtWidgets import QCheckBox
+from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QGridLayout
+from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QRadioButton
+from PySide6.QtWidgets import QSpinBox
+from PySide6.QtWidgets import QTabWidget
+from PySide6.QtWidgets import QVBoxLayout
+from PySide6.QtWidgets import QWidget
 
 import define
 import i18n
 import param
 import task
 
-if os.name == 'nt':
-    import ctypes
-    try:
-        # fix High DPI (HiDPI) scaling issues in TkinterDnD2
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 1 = System Aware
-    except Exception:
-        ctypes.windll.user32.SetProcessDPIAware()  # Fallback for older Windows
-
 # [error] exceeds limit of 178956970 pixels，能否扩大图片像素的限制呢，比如10亿像素。 · Issue #34 · TransparentLC/realesrgan-gui
 # https://github.com/TransparentLC/realesrgan-gui/issues/34
 # https://github.com/python-pillow/Pillow/blob/e3cca4298011a4e74d6f42b4cfe5a0610d3c79a9/src/PIL/Image.py#L3140
 Image.MAX_IMAGE_PIXELS = None
 
-# 深色模式下，滚动条能否统一成深色呢？ · Issue #59 · TransparentLC/realesrgan-gui
-# https://github.com/TransparentLC/realesrgan-gui/issues/59
-# tk的ScrolledText使用的是tk.Scrollbar，无法应用样式
-# 这里从tkinter/scrolledtext.py复制了一份ScrolledText，但是改成了使用ttk.Scrollbar
-class ScrolledText(tk.Text):
-    def __init__(self, master=None, **kw):
-        self.frame = ttk.Frame(master)
-        self.vbar = ttk.Scrollbar(self.frame)
-        self.vbar.pack(side=tk.RIGHT, fill=tk.Y)
+# “开始/继续”按钮的高亮样式（对应 Sun Valley 的 Accent.TButton）
+ACCENT_QSS = '''
+QPushButton[accent="true"] {
+    background-color: #0078d4;
+    color: #ffffff;
+    border: 1px solid #0078d4;
+    border-radius: 4px;
+    padding: 6px 16px;
+}
+QPushButton[accent="true"]:hover {
+    background-color: #1684d8;
+}
+QPushButton[accent="true"]:pressed {
+    background-color: #006cc0;
+}
+'''
 
-        kw.update({'yscrollcommand': self.vbar.set})
-        tk.Text.__init__(self, self.frame, **kw)
-        self.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.vbar['command'] = self.yview
+class REGUIApp(QMainWindow):
+    # 工作线程通过信号把日志/回调投递到 GUI 线程，Qt 不允许跨线程直接操作界面
+    sigOutput = Signal(str)
+    sigComplete = Signal(bool)
+    sigFail = Signal(str)
+    sigFinally = Signal()
+    sigTheme = Signal(str)
 
-        # Copy geometry methods of self.frame without overriding Text
-        # methods -- hack!
-        text_meths = vars(tk.Text).keys()
-        methods = vars(tk.Pack).keys() | vars(tk.Grid).keys() | vars(tk.Place).keys()
-        methods = methods.difference(text_meths)
-
-        for m in methods:
-            if m[0] != '_' and m != 'config' and m != 'configure':
-                setattr(self, m, getattr(self.frame, m))
-
-    def __str__(self):
-        return str(self.frame)
-
-class REGUIApp(ttk.Frame):
-    def __init__(self, parent: tk.Tk, config: configparser.ConfigParser, models: list[str]):
-        super().__init__(parent)
+    def __init__(self, config: configparser.ConfigParser, models: list[str]):
+        super().__init__()
         self.models = models
         for m in (
             'realesrgan-x4plus',
@@ -101,28 +107,36 @@ class REGUIApp(ttk.Frame):
         self.outputPathChanged = True
         self.logPath = os.path.join(define.APP_PATH, 'output.log')
         self.logFile: typing.IO = None
-        self.tcl = TkinterDnD.tkinter.Tcl()
         # 当前的放大进度（0~1）/已放大的文件/总共要放大的文件
-        # self.vardoubleProgress.set((self.progressValue[0] + self.progressValue[1]) / self.progressValue[2] * 100)
         self.progressValue: list[int | float] = [0, 0, 1]
-        # 初始值/结束值/进度/after ID
-        self.progressAnimation: list[float | str] = [0, 0, 0, None]
+        # 初始值/结束值/进度（进度条动画，三次方缓动）
+        self.progressAnimation: list[float] = [0, 0, 0]
+        self.progressCurrent = 0.0
+        self.progressAnimTimer = QTimer(self, interval=10)
+        self.progressAnimTimer.timeout.connect(self.progressAnimStep)
+        # 处理状态
+        self.processing = False
+        self.processingPaused = False
         # 任务栏进度条
-        match sys.platform:
-            case 'win32':
-                import comtypes.client
-                comtypes.client.GetModule(os.path.join(define.BASE_PATH, 'TaskbarLib.tlb'))
-                import comtypes.gen.TaskbarLib
-                self.progressNativeTaskbar = comtypes.client.CreateObject('{56FDF344-FD6D-11d0-958A-006097C9A090}', interface=comtypes.gen.TaskbarLib.ITaskbarList3)
-                self.progressNativeTaskbar.HrInit()
-                self.progressNativeTaskbar.ActivateTab(int(self.master.wm_frame(), 16))
-                self.progressNativeTaskbar.SetProgressState(int(self.master.wm_frame(), 16), 0) # TBPF_NOPROGRESS
-            case _:
-                self.progressNativeTaskbar = None
+        if sys.platform == 'win32':
+            import comtypes.client
+            comtypes.client.GetModule(os.path.join(define.BASE_PATH, 'TaskbarLib.tlb'))
+            import comtypes.gen.TaskbarLib
+            self.progressNativeTaskbar = comtypes.client.CreateObject('{56FDF344-FD6D-11d0-958A-006097C9A090}', interface=comtypes.gen.TaskbarLib.ITaskbarList3)
+            self.progressNativeTaskbar.HrInit()
+            self.progressNativeTaskbar.ActivateTab(int(self.winId()))
+            self.progressNativeTaskbar.SetProgressState(int(self.winId()), 0) # TBPF_NOPROGRESS
+        else:
+            self.progressNativeTaskbar = None
         # 控制是否暂停
         self.pauseEvent = threading.Event()
 
-        self.setupVars()
+        self.sigOutput.connect(self.writeToOutput, Qt.ConnectionType.QueuedConnection)
+        self.sigComplete.connect(self.onTaskComplete, Qt.ConnectionType.QueuedConnection)
+        self.sigFail.connect(self.onTaskFail, Qt.ConnectionType.QueuedConnection)
+        self.sigFinally.connect(self.onTaskFinally, Qt.ConnectionType.QueuedConnection)
+        self.sigTheme.connect(self.applyTheme, Qt.ConnectionType.QueuedConnection)
+
         self.setupWidgets()
 
         if self.config['Config'].get('ModelDir'):
@@ -130,348 +144,403 @@ class REGUIApp(ttk.Frame):
         if self.config['Config'].get('Upscaler'):
             self.writeToOutput(f"Using custom upscaler executable: {self.config['Config'].get('Upscaler')}\nThe executable (and models) may be incompatible with Real-ESRGAN-ncnn-vulkan. Use at your own risk!\n")
 
-    def setupVars(self):
-        def varstrOutputPathCallback(var: tk.IntVar | tk.StringVar, index: str, mode: str):
-            self.outputPathChanged = True
-        def outputPathTraceCallback(var: tk.IntVar | tk.StringVar, index: str, mode: str):
-            if not self.outputPathChanged:
-                self.setInputPath(tuple(p.strip() for p in self.varstrInputPath.get().split('|')))
-        self.varstrInputPath = tk.StringVar()
-        self.varstrOutputPath = tk.StringVar()
-        self.varstrOutputPath.trace_add('write', varstrOutputPathCallback)
-        self.varintResizeMode = tk.IntVar(value=self.config['Config'].getint('ResizeMode'))
-        self.varintResizeMode.trace_add('write', outputPathTraceCallback)
-        self.varintResizeRatio = tk.IntVar(value=self.config['Config'].getint('ResizeRatio'))
-        self.varintResizeRatio.trace_add('write', outputPathTraceCallback)
-        self.varintResizeWidth = tk.IntVar(value=self.config['Config'].getint('ResizeWidth'))
-        self.varintResizeWidth.trace_add('write', outputPathTraceCallback)
-        self.varintResizeHeight = tk.IntVar(value=self.config['Config'].getint('ResizeHeight'))
-        self.varintResizeHeight.trace_add('write', outputPathTraceCallback)
-        self.varintResizeLongestSide = tk.IntVar(value=self.config['Config'].getint('ResizeLongestSide'))
-        self.varintResizeLongestSide.trace_add('write', outputPathTraceCallback)
-        self.varintResizeShortestSide = tk.IntVar(value=self.config['Config'].getint('ResizeShortestSide'))
-        self.varintResizeShortestSide.trace_add('write', outputPathTraceCallback)
-        self.varstrModel = tk.StringVar(value=self.config['Config'].get('Model'))
-        self.varstrModel.trace_add('write', outputPathTraceCallback)
-        self.varintDownsampleIndex = tk.IntVar(value=self.config['Config'].getint('DownsampleIndex'))
-        self.varintTileSizeIndex = tk.IntVar(value=self.config['Config'].getint('TileSizeIndex'))
-        self.varintGPUID = tk.IntVar(value=self.config['Config'].getint('GPUID'))
-        self.varboolUseTTA = tk.BooleanVar(value=self.config['Config'].getboolean('UseTTA'))
-        self.varboolUseWebP = tk.BooleanVar(value=self.config['Config'].getboolean('UseWebP'))
-        self.varboolOptimizeGIF = tk.BooleanVar(value=self.config['Config'].getboolean('OptimizeGIF'))
-        self.varboolLossyMode = tk.BooleanVar(value=self.config['Config'].getboolean('LossyMode'))
-        self.varboolIgnoreError = tk.BooleanVar(value=self.config['Config'].getboolean('IgnoreError'))
-        self.varboolPreupscale = tk.BooleanVar(value=self.config['Config'].getboolean('Preupscale'))
-        self.varboolProcessing = tk.BooleanVar(value=False)
-        self.varboolProcessingPaused = tk.BooleanVar(value=False)
-        self.varstrCustomCommand = tk.StringVar(value=self.config['Config'].get('CustomCommand'))
-        self.varintLossyQuality = tk.IntVar(value=self.config['Config'].getint('LossyQuality'))
-        self.vardoubleProgress = tk.DoubleVar(value=0)
-
-        # StringVars for easily change all labels' strings
-        self.varstrLabelInputPath = tk.StringVar(value=i18n.getTranslatedString('Input'))
-        self.varstrLabelOutputPath = tk.StringVar(value=i18n.getTranslatedString('Output'))
-        self.varstrLabelOpenFileDialogue = tk.StringVar(value=i18n.getTranslatedString('OpenFileDialog'))
-        self.varstrLabelUsedModel = tk.StringVar(value=i18n.getTranslatedString('UsedModel'))
-        self.varstrLabelResizeMode = tk.StringVar(value=i18n.getTranslatedString('ResizeMode'))
-        self.varstrLabelResizeModeRatio = tk.StringVar(value=i18n.getTranslatedString('ResizeModeRatio'))
-        self.varstrLabelResizeModeWidth = tk.StringVar(value=i18n.getTranslatedString('ResizeModeWidth'))
-        self.varstrLabelResizeModeHeight = tk.StringVar(value=i18n.getTranslatedString('ResizeModeHeight'))
-        self.varstrLabelResizeModeLongestSide = tk.StringVar(value=i18n.getTranslatedString('ResizeModeLongestSide'))
-        self.varstrLabelResizeModeShortestSide = tk.StringVar(value=i18n.getTranslatedString('ResizeModeShortestSide'))
-        self.varstrLabelStartProcessing = tk.StringVar(value=i18n.getTranslatedString(('ContinueProcessing' if self.varboolProcessingPaused.get() else 'PauseProcessing') if self.varboolProcessing.get() else 'StartProcessing'))
-        self.varstrLabelDownsampleMode = tk.StringVar(value=i18n.getTranslatedString('DownsampleMode'))
-        self.varstrLabelTileSize = tk.StringVar(value=i18n.getTranslatedString('TileSize'))
-        self.varstrLabelTileSizeAuto = tk.StringVar(value=i18n.getTranslatedString('TileSizeAuto'))
-        self.varstrLabelUsedGPUID = tk.StringVar(value=i18n.getTranslatedString('UsedGPUID'))
-        self.varstrLabelLossyModeQuality = tk.StringVar(value=i18n.getTranslatedString('LossyModeQuality'))
-        self.varstrLabelCustomCommand = tk.StringVar(value=i18n.getTranslatedString('CustomCommand'))
-        self.varstrLabelPreferWebP = tk.StringVar(value=i18n.getTranslatedString('PreferWebP'))
-        self.varstrLabelEnableTTA = tk.StringVar(value=i18n.getTranslatedString('EnableTTA'))
-        self.varstrLabelGIFOptimizeTransparency = tk.StringVar(value=i18n.getTranslatedString('GIFOptimizeTransparency'))
-        self.varstrLabelEnableLossyMode = tk.StringVar(value=i18n.getTranslatedString('EnableLossyMode'))
-        self.varstrLabelEnableIgnoreError = tk.StringVar(value=i18n.getTranslatedString('EnableIgnoreError'))
-        self.varstrLabelEnablePreupscale = tk.StringVar(value=i18n.getTranslatedString('EnablePreupscale'))
-        self.varstrLabelViewREGUISource = tk.StringVar(value=i18n.getTranslatedString('ViewREGUISource'))
-        self.varstrLabelViewRESource = tk.StringVar(value=i18n.getTranslatedString('ViewRESource'))
-        self.varstrLabelViewAdditionalModel = tk.StringVar(value=i18n.getTranslatedString('ViewAdditionalModel'))
-        self.varstrLabelViewDonatePage = tk.StringVar(value=i18n.getTranslatedString('ViewDonatePage'))
-        self.varstrLabelFrameBasicConfig = tk.StringVar(value=i18n.getTranslatedString('FrameBasicConfig'))
-
     def setupWidgets(self):
-        self.rowconfigure(0, weight=0)
-        self.rowconfigure(1, weight=1)
-        self.columnconfigure(0, weight=1)
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        centralLayout = QVBoxLayout(central)
+        centralLayout.setContentsMargins(5, 5, 5, 5)
 
-        self.notebookConfig = ttk.Notebook(self)
-        self.notebookConfig.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
+        self.notebookConfig = QTabWidget(self)
+        centralLayout.addWidget(self.notebookConfig)
 
-        self.frameBasicConfig = ttk.Frame(self.notebookConfig, padding=5)
-        self.frameBasicConfig.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        ttk.Label(self.frameBasicConfig, textvariable=self.varstrLabelInputPath).pack(padx=10, pady=5, fill=tk.X)
-        self.frameInputPath = ttk.Frame(self.frameBasicConfig)
-        self.frameInputPath.columnconfigure(0, weight=1)
-        self.frameInputPath.columnconfigure(1, weight=0)
-        self.frameInputPath.pack(padx=5, pady=5, fill=tk.X)
-        self.entryInputPath = ttk.Entry(self.frameInputPath, textvariable=self.varstrInputPath)
-        self.entryInputPath.grid(row=0, column=0, padx=5, sticky=tk.EW)
-        self.buttonInputPath = ttk.Button(self.frameInputPath, textvariable=self.varstrLabelOpenFileDialogue, command=self.buttonInputPath_click)
-        self.buttonInputPath.grid(row=0, column=1, padx=5)
-        ttk.Label(self.frameBasicConfig, textvariable=self.varstrLabelOutputPath).pack(padx=10, pady=5, fill=tk.X)
-        self.frameOutputPath = ttk.Frame(self.frameBasicConfig)
-        self.frameOutputPath.columnconfigure(0, weight=1)
-        self.frameOutputPath.columnconfigure(1, weight=0)
-        self.frameOutputPath.pack(padx=5, pady=5, fill=tk.X)
-        self.entryOutputPath = ttk.Entry(self.frameOutputPath, textvariable=self.varstrOutputPath)
-        self.entryOutputPath.grid(row=0, column=0, padx=5, sticky=tk.EW)
-        self.buttonOutputPath = ttk.Button(self.frameOutputPath, textvariable=self.varstrLabelOpenFileDialogue, command=self.buttonOutputPath_click)
-        self.buttonOutputPath.grid(row=0, column=1, padx=5)
-        self.frameBasicConfigBottom = ttk.Frame(self.frameBasicConfig)
-        self.frameBasicConfigBottom.columnconfigure(0, weight=0)
-        self.frameBasicConfigBottom.columnconfigure(1, weight=1)
-        self.frameBasicConfigBottom.pack(fill=tk.X)
-        self.frameModel = ttk.Frame(self.frameBasicConfigBottom)
-        self.frameModel.grid(row=0, column=1, sticky=tk.NSEW)
-        ttk.Label(self.frameModel, textvariable=self.varstrLabelUsedModel).pack(padx=10, pady=5, fill=tk.X)
-        self.comboModel = ttk.Combobox(self.frameModel, state='readonly', values=self.models, textvariable=self.varstrModel)
-        if self.varstrModel.get() in self.models:
-            self.comboModel.current(self.models.index(self.varstrModel.get()))
+        # ---- 基本配置 ----
+        self.frameBasicConfig = QWidget(self)
+        basicLayout = QVBoxLayout(self.frameBasicConfig)
+        basicLayout.setContentsMargins(5, 5, 5, 5)
+
+        self.labelInputPath = QLabel(self.frameBasicConfig)
+        basicLayout.addWidget(self.labelInputPath)
+        inputRow = QHBoxLayout()
+        self.entryInputPath = QLineEdit(self.frameBasicConfig)
+        inputRow.addWidget(self.entryInputPath, 1)
+        self.buttonInputPath = QPushButton(self.frameBasicConfig)
+        self.buttonInputPath.clicked.connect(self.buttonInputPath_click)
+        inputRow.addWidget(self.buttonInputPath)
+        basicLayout.addLayout(inputRow)
+
+        self.labelOutputPath = QLabel(self.frameBasicConfig)
+        basicLayout.addWidget(self.labelOutputPath)
+        outputRow = QHBoxLayout()
+        self.entryOutputPath = QLineEdit(self.frameBasicConfig)
+        # 手动修改输出路径后，缩放参数变化时不再自动重算
+        self.entryOutputPath.textEdited.connect(lambda: setattr(self, 'outputPathChanged', True))
+        outputRow.addWidget(self.entryOutputPath, 1)
+        self.buttonOutputPath = QPushButton(self.frameBasicConfig)
+        self.buttonOutputPath.clicked.connect(self.buttonOutputPath_click)
+        outputRow.addWidget(self.buttonOutputPath)
+        basicLayout.addLayout(outputRow)
+
+        bottomRow = QHBoxLayout()
+        frameResize = QWidget(self.frameBasicConfig)
+        resizeLayout = QGridLayout(frameResize)
+        resizeLayout.setContentsMargins(0, 0, 0, 0)
+        self.labelResizeMode = QLabel(frameResize)
+        resizeLayout.addWidget(self.labelResizeMode, 0, 0, 1, 2)
+        self.resizeModeGroup = QButtonGroup(self)
+        self.radioResizeRatio = QRadioButton(frameResize)
+        self.spinResizeRatio = QSpinBox(frameResize, minimum=2, maximum=16)
+        resizeLayout.addWidget(self.radioResizeRatio, 1, 0)
+        resizeLayout.addWidget(self.spinResizeRatio, 1, 1)
+        self.radioResizeWidth = QRadioButton(frameResize)
+        self.spinResizeWidth = QSpinBox(frameResize, minimum=1, maximum=16383)
+        resizeLayout.addWidget(self.radioResizeWidth, 2, 0)
+        resizeLayout.addWidget(self.spinResizeWidth, 2, 1)
+        self.radioResizeHeight = QRadioButton(frameResize)
+        self.spinResizeHeight = QSpinBox(frameResize, minimum=1, maximum=16383)
+        resizeLayout.addWidget(self.radioResizeHeight, 3, 0)
+        resizeLayout.addWidget(self.spinResizeHeight, 3, 1)
+        self.radioResizeLongestSide = QRadioButton(frameResize)
+        self.spinResizeLongestSide = QSpinBox(frameResize, minimum=1, maximum=16383)
+        resizeLayout.addWidget(self.radioResizeLongestSide, 4, 0)
+        resizeLayout.addWidget(self.spinResizeLongestSide, 4, 1)
+        self.radioResizeShortestSide = QRadioButton(frameResize)
+        self.spinResizeShortestSide = QSpinBox(frameResize, minimum=1, maximum=16383)
+        resizeLayout.addWidget(self.radioResizeShortestSide, 5, 0)
+        resizeLayout.addWidget(self.spinResizeShortestSide, 5, 1)
+        for radio, mode in (
+            (self.radioResizeRatio, param.ResizeMode.RATIO),
+            (self.radioResizeWidth, param.ResizeMode.WIDTH),
+            (self.radioResizeHeight, param.ResizeMode.HEIGHT),
+            (self.radioResizeLongestSide, param.ResizeMode.LONGEST_SIDE),
+            (self.radioResizeShortestSide, param.ResizeMode.SHORTEST_SIDE),
+        ):
+            self.resizeModeGroup.addButton(radio, int(mode))
+        bottomRow.addWidget(frameResize, 1)
+
+        rightColumn = QVBoxLayout()
+        self.labelUsedModel = QLabel(self.frameBasicConfig)
+        rightColumn.addWidget(self.labelUsedModel)
+        self.comboModel = QComboBox(self.frameBasicConfig)
+        self.comboModel.addItems(self.models)
+        rightColumn.addWidget(self.comboModel)
+        rightColumn.addStretch(1)
+        self.buttonProcess = QPushButton(self.frameBasicConfig)
+        self.buttonProcess.clicked.connect(self.buttonProcess_click)
+        rightColumn.addWidget(self.buttonProcess, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        bottomRow.addLayout(rightColumn, 1)
+        basicLayout.addLayout(bottomRow)
+
+        # ---- 高级配置 ----
+        self.frameAdvancedConfig = QWidget(self)
+        advancedLayout = QHBoxLayout(self.frameAdvancedConfig)
+        advancedLayout.setContentsMargins(5, 5, 5, 5)
+
+        leftColumn = QVBoxLayout()
+        downTileRow = QHBoxLayout()
+        downColumn = QVBoxLayout()
+        self.labelDownsampleMode = QLabel(self.frameAdvancedConfig)
+        downColumn.addWidget(self.labelDownsampleMode)
+        self.comboDownsample = QComboBox(self.frameAdvancedConfig)
+        self.comboDownsample.addItems(tuple(x[0] for x in self.downsample))
+        downColumn.addWidget(self.comboDownsample)
+        downTileRow.addLayout(downColumn, 1)
+        tileColumn = QVBoxLayout()
+        self.labelTileSize = QLabel(self.frameAdvancedConfig)
+        tileColumn.addWidget(self.labelTileSize)
+        self.comboTileSize = QComboBox(self.frameAdvancedConfig)
+        tileColumn.addWidget(self.comboTileSize)
+        downTileRow.addLayout(tileColumn, 1)
+        leftColumn.addLayout(downTileRow)
+
+        self.labelUsedGPUID = QLabel(self.frameAdvancedConfig)
+        leftColumn.addWidget(self.labelUsedGPUID)
+        self.spinGPUID = QSpinBox(self.frameAdvancedConfig, minimum=-1, maximum=7)
+        leftColumn.addWidget(self.spinGPUID)
+        self.labelLossyModeQuality = QLabel(self.frameAdvancedConfig)
+        leftColumn.addWidget(self.labelLossyModeQuality)
+        self.spinLossyQuality = QSpinBox(self.frameAdvancedConfig, minimum=0, maximum=100, singleStep=5)
+        leftColumn.addWidget(self.spinLossyQuality)
+        self.labelCustomCommand = QLabel(self.frameAdvancedConfig)
+        leftColumn.addWidget(self.labelCustomCommand)
+        self.entryCustomCommand = QLineEdit(self.frameAdvancedConfig)
+        leftColumn.addWidget(self.entryCustomCommand)
+        leftColumn.addStretch(1)
+        advancedLayout.addLayout(leftColumn, 1)
+
+        rightColumnAdv = QVBoxLayout()
+        self.checkUseWebP = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkUseWebP)
+        self.checkUseTTA = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkUseTTA)
+        self.checkOptimizeGIF = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkOptimizeGIF)
+        self.checkLossyMode = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkLossyMode)
+        self.checkIgnoreError = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkIgnoreError)
+        self.checkPreupscale = QCheckBox(self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkPreupscale)
+        self.comboLanguage = QComboBox(self.frameAdvancedConfig)
+        self.comboLanguage.addItems(tuple(i18n.locales_map.keys()))
+        rightColumnAdv.addWidget(self.comboLanguage)
+        rightColumnAdv.addStretch(1)
+        advancedLayout.addLayout(rightColumnAdv, 3)
+
+        # ---- 关于 ----
+        self.frameAbout = QWidget(self)
+        aboutLayout = QVBoxLayout(self.frameAbout)
+        aboutLayout.addStretch(1)
+        labelIcon = QLabel(self.frameAbout)
+        labelIcon.setPixmap(QPixmap(os.path.join(define.BASE_PATH, 'icon-128px.png')))
+        labelIcon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        aboutLayout.addWidget(labelIcon)
+        labelTitle = QLabel(define.APP_TITLE, self.frameAbout)
+        f = QFont(labelTitle.font())
+        f.setPointSize(16)
+        labelTitle.setFont(f)
+        labelTitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        aboutLayout.addWidget(labelTitle)
+        labelAuthor = QLabel('By TransparentLC' + (time.strftime("\nBuilt at %Y-%m-%d %H:%M:%S", time.localtime(define.BUILD_TIME)) if define.BUILD_TIME else ""), self.frameAbout)
+        labelAuthor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        aboutLayout.addWidget(labelAuthor)
+        aboutButtonGrid = QGridLayout()
+        self.buttonViewREGUISource = QPushButton(self.frameAbout)
+        self.buttonViewREGUISource.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui'))
+        aboutButtonGrid.addWidget(self.buttonViewREGUISource, 0, 0)
+        self.buttonViewRESource = QPushButton(self.frameAbout)
+        self.buttonViewRESource.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan'))
+        aboutButtonGrid.addWidget(self.buttonViewRESource, 0, 1)
+        self.buttonViewAdditionalModel = QPushButton(self.frameAbout)
+        self.buttonViewAdditionalModel.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui/releases/tag/additional-models'))
+        aboutButtonGrid.addWidget(self.buttonViewAdditionalModel, 1, 0)
+        self.buttonViewDonatePage = QPushButton(self.frameAbout)
+        self.buttonViewDonatePage.clicked.connect(lambda: webbrowser.open_new_tab('https://i.akarin.dev/donate/'))
+        aboutButtonGrid.addWidget(self.buttonViewDonatePage, 1, 1)
+        aboutButtonRow = QHBoxLayout()
+        aboutButtonRow.addStretch(1)
+        aboutButtonRow.addLayout(aboutButtonGrid)
+        aboutButtonRow.addStretch(1)
+        aboutLayout.addLayout(aboutButtonRow)
+        aboutLayout.addStretch(1)
+
+        self.notebookConfig.addTab(self.frameBasicConfig, '')
+        self.notebookConfig.addTab(self.frameAdvancedConfig, '')
+        self.notebookConfig.addTab(self.frameAbout, '')
+
+        # ---- 日志输出与进度条 ----
+        self.textOutput = QPlainTextEdit(self)
+        self.textOutput.setReadOnly(True)
+        centralLayout.addWidget(self.textOutput, 1)
+
+        self.progressbar = QProgressBar(self, minimum=0, maximum=1000)
+        self.progressbar.setValue(0)
+        centralLayout.addWidget(self.progressbar)
+
+        # ---- 从配置恢复初始值 ----
+        c = self.config['Config']
+        self.spinResizeRatio.setValue(c.getint('ResizeRatio'))
+        self.spinResizeWidth.setValue(c.getint('ResizeWidth'))
+        self.spinResizeHeight.setValue(c.getint('ResizeHeight'))
+        self.spinResizeLongestSide.setValue(c.getint('ResizeLongestSide'))
+        self.spinResizeShortestSide.setValue(c.getint('ResizeShortestSide'))
+        resizeModeButton = self.resizeModeGroup.button(c.getint('ResizeMode'))
+        if resizeModeButton:
+            resizeModeButton.setChecked(True)
         else:
-            self.varstrModel.set(self.models[0])
-        self.comboModel.pack(padx=10, pady=5, fill=tk.X)
-        self.comboModel.bind('<<ComboboxSelected>>', lambda e: e.widget.select_clear())
-        self.frameResize = ttk.Frame(self.frameBasicConfigBottom)
-        self.frameResize.grid(row=0, column=0, sticky=tk.NSEW)
-        ttk.Label(self.frameResize, textvariable=self.varstrLabelResizeMode).grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky=tk.EW)
-        self.radioResizeRatio = ttk.Radiobutton(self.frameResize, textvariable=self.varstrLabelResizeModeRatio, value=int(param.ResizeMode.RATIO), variable=self.varintResizeMode)
-        self.radioResizeRatio.grid(row=1, column=0, padx=5, pady=5, sticky=tk.EW)
-        self.spinResizeRatio = ttk.Spinbox(self.frameResize, from_=2, to=16, increment=1, width=12, textvariable=self.varintResizeRatio)
-        self.spinResizeRatio.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
-        self.radioResizeWidth = ttk.Radiobutton(self.frameResize, textvariable=self.varstrLabelResizeModeWidth, value=int(param.ResizeMode.WIDTH), variable=self.varintResizeMode)
-        self.radioResizeWidth.grid(row=2, column=0, padx=5, pady=5, sticky=tk.EW)
-        self.spinResizeWidth = ttk.Spinbox(self.frameResize, from_=1, to=16383, increment=1, width=12, textvariable=self.varintResizeWidth)
-        self.spinResizeWidth.grid(row=2, column=1, padx=5, pady=5, sticky=tk.EW)
-        self.radioResizeHeight = ttk.Radiobutton(self.frameResize, textvariable=self.varstrLabelResizeModeHeight, value=int(param.ResizeMode.HEIGHT), variable=self.varintResizeMode)
-        self.radioResizeHeight.grid(row=3, column=0, padx=5, pady=5, sticky=tk.EW)
-        self.spinResizeHeight = ttk.Spinbox(self.frameResize, from_=1, to=16383, increment=1, width=12, textvariable=self.varintResizeHeight)
-        self.spinResizeHeight.grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
-        self.radioResizeLongestSide = ttk.Radiobutton(self.frameResize, textvariable=self.varstrLabelResizeModeLongestSide, value=int(param.ResizeMode.LONGEST_SIDE), variable=self.varintResizeMode)
-        self.radioResizeLongestSide.grid(row=4, column=0, padx=5, pady=5, sticky=tk.EW)
-        self.spinResizeLongestSide = ttk.Spinbox(self.frameResize, from_=1, to=16383, increment=1, width=12, textvariable=self.varintResizeLongestSide)
-        self.spinResizeLongestSide.grid(row=4, column=1, padx=5, pady=5, sticky=tk.EW)
-        self.radioResizeShortestSide = ttk.Radiobutton(self.frameResize, textvariable=self.varstrLabelResizeModeShortestSide, value=int(param.ResizeMode.SHORTEST_SIDE), variable=self.varintResizeMode)
-        self.radioResizeShortestSide.grid(row=5, column=0, padx=5, pady=5, sticky=tk.EW)
-        self.spinResizeShortestSide = ttk.Spinbox(self.frameResize, from_=1, to=16383, increment=1, width=12, textvariable=self.varintResizeShortestSide)
-        self.spinResizeShortestSide.grid(row=5, column=1, padx=5, pady=5, sticky=tk.EW)
-        self.buttonProcess = ttk.Button(self.frameBasicConfigBottom, textvariable=self.varstrLabelStartProcessing, style='Accent.TButton', width=6, command=self.buttonProcess_click)
-        self.buttonProcess.grid(row=0, column=1, padx=5, pady=5, sticky=tk.SE)
+            self.radioResizeRatio.setChecked(True)
+        self.comboModel.setCurrentIndex(self.models.index(c.get('Model')) if c.get('Model') in self.models else 0)
+        self.comboDownsample.setCurrentIndex(c.getint('DownsampleIndex'))
+        self.spinGPUID.setValue(c.getint('GPUID'))
+        self.spinLossyQuality.setValue(c.getint('LossyQuality'))
+        self.checkUseWebP.setChecked(c.getboolean('UseWebP'))
+        self.checkUseTTA.setChecked(c.getboolean('UseTTA'))
+        self.checkOptimizeGIF.setChecked(c.getboolean('OptimizeGIF'))
+        self.checkLossyMode.setChecked(c.getboolean('LossyMode'))
+        self.checkIgnoreError.setChecked(c.getboolean('IgnoreError'))
+        self.checkPreupscale.setChecked(c.getboolean('Preupscale'))
+        self.entryCustomCommand.setText(c.get('CustomCommand'))
+        self.comboLanguage.setCurrentIndex(i18n.get_current_locale_display_name())
 
-        self.frameAdvancedConfig = ttk.Frame(self.notebookConfig, padding=5)
-        self.frameAdvancedConfig.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        self.frameAdvancedConfig.columnconfigure(0, weight=1)
-        self.frameAdvancedConfig.columnconfigure(1, weight=3)
-        self.frameAdvancedConfigLeft = ttk.Frame(self.frameAdvancedConfig)
-        self.frameAdvancedConfigLeft.grid(row=0, column=0, sticky=tk.NSEW)
-        self.frameAdvancedConfigRight = ttk.Frame(self.frameAdvancedConfig)
-        self.frameAdvancedConfigRight.grid(row=0, column=1, sticky=tk.NSEW)
-        self.frameAdvancedConfigLeftSub = ttk.Frame(self.frameAdvancedConfigLeft)
-        self.frameAdvancedConfigLeftSub.pack(fill=tk.X)
-        self.frameAdvancedConfigLeftSub.columnconfigure(0, weight=1)
-        self.frameAdvancedConfigLeftSub.columnconfigure(1, weight=1)
-        self.frameAdvancedConfigLeftSubLeft = ttk.Frame(self.frameAdvancedConfigLeftSub)
-        self.frameAdvancedConfigLeftSubLeft.grid(row=0, column=0, sticky=tk.NSEW)
-        self.frameAdvancedConfigLeftSubRight = ttk.Frame(self.frameAdvancedConfigLeftSub)
-        self.frameAdvancedConfigLeftSubRight.grid(row=0, column=1, sticky=tk.NSEW)
-        ttk.Label(self.frameAdvancedConfigLeftSubLeft, textvariable=self.varstrLabelDownsampleMode).pack(padx=10, pady=5, fill=tk.X)
-        self.comboDownsample = ttk.Combobox(self.frameAdvancedConfigLeftSubLeft, state='readonly', values=tuple(x[0] for x in self.downsample), width=12)
-        self.comboDownsample.current(self.varintDownsampleIndex.get())
-        self.comboDownsample.pack(padx=10, pady=5, fill=tk.X)
-        self.comboDownsample.bind('<<ComboboxSelected>>', self.comboDownsample_click)
-        ttk.Label(self.frameAdvancedConfigLeftSubRight, textvariable=self.varstrLabelTileSize).pack(padx=10, pady=5, fill=tk.X)
-        self.comboTileSize = ttk.Combobox(self.frameAdvancedConfigLeftSubRight, state='readonly', values=(self.varstrLabelTileSizeAuto.get(), *self.tileSize[1:]), width=12)
-        self.comboTileSize.current(self.varintTileSizeIndex.get())
-        self.comboTileSize.pack(padx=10, pady=5, fill=tk.X)
-        ttk.Label(self.frameAdvancedConfigLeft, textvariable=self.varstrLabelUsedGPUID).pack(padx=10, pady=5, fill=tk.X)
-        self.spinGPUID = ttk.Spinbox(self.frameAdvancedConfigLeft, from_=-1, to=7, increment=1, width=12, textvariable=self.varintGPUID)
-        self.spinGPUID.pack(padx=10, pady=5, fill=tk.X)
-        ttk.Label(self.frameAdvancedConfigLeft, textvariable=self.varstrLabelLossyModeQuality).pack(padx=10, pady=5, fill=tk.X)
-        self.spinLossyQuality = ttk.Spinbox(self.frameAdvancedConfigLeft, from_=0, to=100, increment=5, width=12, textvariable=self.varintLossyQuality)
-        self.spinLossyQuality.set(self.varintLossyQuality.get())
-        self.spinLossyQuality.pack(padx=10, pady=5, fill=tk.X)
-        self.comboTileSize.bind('<<ComboboxSelected>>', self.comboTileSize_click)
-        ttk.Label(self.frameAdvancedConfigLeft, textvariable=self.varstrLabelCustomCommand).pack(padx=10, pady=5, fill=tk.X)
-        self.entryCustomCommand = ttk.Entry(self.frameAdvancedConfigLeft, textvariable=self.varstrCustomCommand)
-        self.entryCustomCommand.pack(padx=10, pady=5, fill=tk.X)
-        self.checkUseWebP = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelPreferWebP, style='Switch.TCheckbutton', variable=self.varboolUseWebP)
-        self.checkUseWebP.pack(padx=10, pady=5, fill=tk.X)
-        self.checkUseTTA = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelEnableTTA, style='Switch.TCheckbutton', variable=self.varboolUseTTA)
-        self.checkUseTTA.pack(padx=10, pady=5, fill=tk.X)
-        self.checkOptimizeGIF = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelGIFOptimizeTransparency, style='Switch.TCheckbutton', variable=self.varboolOptimizeGIF)
-        self.checkOptimizeGIF.pack(padx=10, pady=5, fill=tk.X)
-        self.checkLossyMode = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelEnableLossyMode, style='Switch.TCheckbutton', variable=self.varboolLossyMode)
-        self.checkLossyMode.pack(padx=10, pady=5, fill=tk.X)
-        self.checkIgnoreError = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelEnableIgnoreError, style='Switch.TCheckbutton', variable=self.varboolIgnoreError)
-        self.checkIgnoreError.pack(padx=10, pady=5, fill=tk.X)
-        self.checkPreupscale = ttk.Checkbutton(self.frameAdvancedConfigRight, textvariable=self.varstrLabelEnablePreupscale, style='Switch.TCheckbutton', variable=self.varboolPreupscale)
-        self.checkPreupscale.pack(padx=10, pady=5, fill=tk.X)
-        self.comboLanguage = ttk.Combobox(self.frameAdvancedConfigRight, state='readonly', values=tuple(i18n.locales_map.keys()))
-        self.comboLanguage.current(i18n.get_current_locale_display_name())
-        self.comboLanguage.pack(padx=10, pady=5, fill=tk.X)
-        self.comboLanguage.bind('<<ComboboxSelected>>', self.change_app_lang)
+        self.retranslateUi()
+        self.comboTileSize.setCurrentIndex(c.getint('TileSizeIndex'))
 
-        self.frameAbout = ttk.Frame(self.notebookConfig, padding=5)
-        self.frameAbout.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        self.frameAboutContent = ttk.Frame(self.frameAbout)
-        self.frameAboutContent.place(relx=.5, rely=.5, anchor=tk.CENTER)
-        f = ttk.Label().cget('font').string.split(' ')
-        f[-1] = '16'
-        f = ' '.join(f)
-        self.imageIcon = ImageTk.PhotoImage(Image.open(os.path.join(define.BASE_PATH, 'icon-128px.png')))
-        ttk.Label(self.frameAboutContent, image=self.imageIcon).pack(padx=10, pady=10)
-        ttk.Label(self.frameAboutContent, text=define.APP_TITLE, font=f, justify=tk.CENTER).pack()
-        ttk.Label(self.frameAboutContent, text='By TransparentLC' + (time.strftime("\nBuilt at %Y-%m-%d %H:%M:%S", time.localtime(define.BUILD_TIME)) if define.BUILD_TIME else ""), justify=tk.CENTER).pack()
-        self.frameAboutBottom = ttk.Frame(self.frameAboutContent)
-        self.frameAboutBottom.pack()
-        ttk.Button(self.frameAboutBottom, textvariable=self.varstrLabelViewREGUISource, command=lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui')).grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        ttk.Button(self.frameAboutBottom, textvariable=self.varstrLabelViewRESource, command=lambda: webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan')).grid(row=0, column=1, padx=5, pady=5, sticky=tk.NSEW)
-        ttk.Button(self.frameAboutBottom, textvariable=self.varstrLabelViewAdditionalModel, command=lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui/releases/tag/additional-models')).grid(row=1, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        ttk.Button(self.frameAboutBottom, textvariable=self.varstrLabelViewDonatePage, command=lambda: webbrowser.open_new_tab('https://i.akarin.dev/donate/')).grid(row=1, column=1, padx=5, pady=5, sticky=tk.NSEW)
+        # ---- 信号连接（初始值恢复完成后再连，避免误触发输出路径重算）----
+        self.resizeModeGroup.idToggled.connect(self.outputPathTraceCallback)
+        self.spinResizeRatio.valueChanged.connect(self.outputPathTraceCallback)
+        self.spinResizeWidth.valueChanged.connect(self.outputPathTraceCallback)
+        self.spinResizeHeight.valueChanged.connect(self.outputPathTraceCallback)
+        self.spinResizeLongestSide.valueChanged.connect(self.outputPathTraceCallback)
+        self.spinResizeShortestSide.valueChanged.connect(self.outputPathTraceCallback)
+        self.comboModel.currentTextChanged.connect(self.outputPathTraceCallback)
+        self.comboLanguage.currentIndexChanged.connect(self.change_app_lang)
 
-        self.notebookConfig.add(self.frameBasicConfig, text=i18n.getTranslatedString('FrameBasicConfig'))
-        self.notebookConfig.add(self.frameAdvancedConfig, text=i18n.getTranslatedString('FrameAdvancedConfig'))
-        self.notebookConfig.add(self.frameAbout, text=i18n.getTranslatedString('FrameAbout'))
+        # 子控件默认会接受文本拖拽，关闭后拖拽事件才会冒泡到主窗口统一处理
+        for w in (self.entryInputPath, self.entryOutputPath, self.entryCustomCommand, self.textOutput):
+            w.setAcceptDrops(False)
+        self.setAcceptDrops(True)
 
-        self.textOutput = ScrolledText(self)
-        self.textOutput.grid(row=1, column=0, padx=5, pady=5, sticky=tk.NSEW)
-        self.textOutput.configure(state=tk.DISABLED)
+    def retranslateUi(self):
+        self.notebookConfig.setTabText(0, i18n.getTranslatedString('FrameBasicConfig'))
+        self.notebookConfig.setTabText(1, i18n.getTranslatedString('FrameAdvancedConfig'))
+        self.notebookConfig.setTabText(2, i18n.getTranslatedString('FrameAbout'))
 
-        self.progressbar = ttk.Progressbar(self, orient='horizontal', mode='determinate', variable=self.vardoubleProgress)
-        self.progressbar.grid(row=2, column=0, padx=5, pady=5, sticky=tk.NSEW)
+        self.labelInputPath.setText(i18n.getTranslatedString('Input'))
+        self.labelOutputPath.setText(i18n.getTranslatedString('Output'))
+        self.buttonInputPath.setText(i18n.getTranslatedString('OpenFileDialog'))
+        self.buttonOutputPath.setText(i18n.getTranslatedString('OpenFileDialog'))
+        self.labelUsedModel.setText(i18n.getTranslatedString('UsedModel'))
+        self.labelResizeMode.setText(i18n.getTranslatedString('ResizeMode'))
+        self.radioResizeRatio.setText(i18n.getTranslatedString('ResizeModeRatio'))
+        self.radioResizeWidth.setText(i18n.getTranslatedString('ResizeModeWidth'))
+        self.radioResizeHeight.setText(i18n.getTranslatedString('ResizeModeHeight'))
+        self.radioResizeLongestSide.setText(i18n.getTranslatedString('ResizeModeLongestSide'))
+        self.radioResizeShortestSide.setText(i18n.getTranslatedString('ResizeModeShortestSide'))
+        self.updateProcessButton()
+        self.labelDownsampleMode.setText(i18n.getTranslatedString('DownsampleMode'))
 
-    def change_app_lang(self, event: tk.Event):
-        lang = self.comboLanguage.get()
-        lang = i18n.locales_map[lang]
-        i18n.set_current_language(lang)
+        self.labelTileSize.setText(i18n.getTranslatedString('TileSize'))
+        # Tile 尺寸下拉首项是翻译文本，需要随语言切换重译
+        tileSizeIndex = self.comboTileSize.currentIndex()
+        self.comboTileSize.blockSignals(True)
+        self.comboTileSize.clear()
+        self.comboTileSize.addItem(i18n.getTranslatedString('TileSizeAuto'))
+        self.comboTileSize.addItems(tuple(str(x) for x in self.tileSize[1:]))
+        self.comboTileSize.setCurrentIndex(max(tileSizeIndex, 0))
+        self.comboTileSize.blockSignals(False)
 
-        self.notebookConfig.tab(self.frameBasicConfig, text=i18n.getTranslatedString('FrameBasicConfig'))
-        self.notebookConfig.tab(self.frameAdvancedConfig, text=i18n.getTranslatedString('FrameAdvancedConfig'))
-        self.notebookConfig.tab(self.frameAbout, text=i18n.getTranslatedString('FrameAbout'))
+        self.labelUsedGPUID.setText(i18n.getTranslatedString('UsedGPUID'))
+        self.labelLossyModeQuality.setText(i18n.getTranslatedString('LossyModeQuality'))
+        self.labelCustomCommand.setText(i18n.getTranslatedString('CustomCommand'))
+        self.checkUseWebP.setText(i18n.getTranslatedString('PreferWebP'))
+        self.checkUseTTA.setText(i18n.getTranslatedString('EnableTTA'))
+        self.checkOptimizeGIF.setText(i18n.getTranslatedString('GIFOptimizeTransparency'))
+        self.checkLossyMode.setText(i18n.getTranslatedString('EnableLossyMode'))
+        self.checkIgnoreError.setText(i18n.getTranslatedString('EnableIgnoreError'))
+        self.checkPreupscale.setText(i18n.getTranslatedString('EnablePreupscale'))
+        self.buttonViewREGUISource.setText(i18n.getTranslatedString('ViewREGUISource'))
+        self.buttonViewRESource.setText(i18n.getTranslatedString('ViewRESource'))
+        self.buttonViewAdditionalModel.setText(i18n.getTranslatedString('ViewAdditionalModel'))
+        self.buttonViewDonatePage.setText(i18n.getTranslatedString('ViewDonatePage'))
 
-        self.varstrLabelInputPath.set(i18n.getTranslatedString('Input'))
-        self.varstrLabelOutputPath.set(i18n.getTranslatedString('Output'))
-        self.varstrLabelOpenFileDialogue.set(i18n.getTranslatedString('OpenFileDialog'))
-        self.varstrLabelUsedModel.set(i18n.getTranslatedString('UsedModel'))
-        self.varstrLabelResizeMode.set(i18n.getTranslatedString('ResizeMode'))
-        self.varstrLabelResizeModeRatio.set(i18n.getTranslatedString('ResizeModeRatio'))
-        self.varstrLabelResizeModeWidth.set(i18n.getTranslatedString('ResizeModeWidth'))
-        self.varstrLabelResizeModeHeight.set(i18n.getTranslatedString('ResizeModeHeight'))
-        self.varstrLabelResizeModeLongestSide.set(i18n.getTranslatedString('ResizeModeLongestSide'))
-        self.varstrLabelResizeModeShortestSide.set(i18n.getTranslatedString('ResizeModeShortestSide'))
-        self.varstrLabelStartProcessing.set(i18n.getTranslatedString(('ContinueProcessing' if self.varboolProcessingPaused.get() else 'PauseProcessing') if self.varboolProcessing.get() else 'StartProcessing'))
-        self.varstrLabelDownsampleMode.set(i18n.getTranslatedString('DownsampleMode'))
+    def updateProcessButton(self):
+        self.buttonProcess.setText(i18n.getTranslatedString(('ContinueProcessing' if self.processingPaused else 'PauseProcessing') if self.processing else 'StartProcessing'))
+        self.setButtonAccent(self.buttonProcess, not (self.processing and not self.processingPaused))
 
-        self.varstrLabelTileSize.set(i18n.getTranslatedString('TileSize'))
-        self.varstrLabelTileSizeAuto.set(i18n.getTranslatedString('TileSizeAuto'))
-        self.comboTileSize['values'] = (self.varstrLabelTileSizeAuto.get(), *self.tileSize[1:])
-        self.comboTileSize.current(self.varintTileSizeIndex.get())
+    @staticmethod
+    def setButtonAccent(button: QPushButton, accent: bool):
+        button.setProperty('accent', 'true' if accent else 'false')
+        button.style().unpolish(button)
+        button.style().polish(button)
 
-        self.varstrLabelUsedGPUID.set(i18n.getTranslatedString('UsedGPUID'))
-        self.varstrLabelLossyModeQuality.set(i18n.getTranslatedString('LossyModeQuality'))
-        self.varstrLabelCustomCommand.set(i18n.getTranslatedString('CustomCommand'))
-        self.varstrLabelPreferWebP.set(i18n.getTranslatedString('PreferWebP'))
-        self.varstrLabelEnableTTA.set(value=i18n.getTranslatedString('EnableTTA'))
-        self.varstrLabelGIFOptimizeTransparency.set(i18n.getTranslatedString('GIFOptimizeTransparency'))
-        self.varstrLabelEnableLossyMode.set(i18n.getTranslatedString('EnableLossyMode'))
-        self.varstrLabelEnableIgnoreError.set(i18n.getTranslatedString('EnableIgnoreError'))
-        self.varstrLabelEnablePreupscale.set(i18n.getTranslatedString('EnablePreupscale'))
-        self.varstrLabelViewREGUISource.set(i18n.getTranslatedString('ViewREGUISource'))
-        self.varstrLabelViewRESource.set(i18n.getTranslatedString('ViewRESource'))
-        self.varstrLabelViewAdditionalModel.set(i18n.getTranslatedString('ViewAdditionalModel'))
-        self.varstrLabelViewDonatePage.set(i18n.getTranslatedString('ViewDonatePage'))
-        self.varstrLabelFrameBasicConfig.set(i18n.getTranslatedString('FrameBasicConfig'))
+    def change_app_lang(self, index: int):
+        i18n.set_current_language(i18n.locales_map[self.comboLanguage.currentText()])
+        self.retranslateUi()
 
-    def close(self):
+    def applyTheme(self, theme: str):
+        import qdarktheme
+        qdarktheme.setup_theme(theme.lower() if theme else 'light', additional_qss=ACCENT_QSS)
+        # https://stackoverflow.com/questions/57124243/winforms-dark-title-bar-on-windows-10
+        if sys.platform == 'win32':
+            import ctypes
+            match sys.getwindowsversion().build:
+                case build if build >= 18985:
+                    attribute = 20
+                case build if build >= 17763:
+                    attribute = 19
+                case _:
+                    attribute = None
+            if attribute:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    int(self.winId()),
+                    attribute,
+                    ctypes.byref(ctypes.c_int(theme == 'Dark')),
+                    ctypes.sizeof(ctypes.c_int),
+                )
+
+    def closeEvent(self, event):
+        self.saveConfig()
+        super().closeEvent(event)
+
+    def saveConfig(self):
         self.config['DEFAULT'] = {}
         self.config['Config'] = {
             'Upscaler': self.config['Config'].get('Upscaler') or '',
             'ModelDir': self.config['Config'].get('ModelDir') or '',
-            'ResizeMode': self.varintResizeMode.get(),
-            'ResizeRatio': self.varintResizeRatio.get(),
-            'ResizeWidth': self.varintResizeWidth.get(),
-            'ResizeHeight': self.varintResizeHeight.get(),
-            'ResizeLongestSide': self.varintResizeLongestSide.get(),
-            'ResizeShortestSide': self.varintResizeShortestSide.get(),
-            'Model': self.varstrModel.get(),
-            'DownsampleIndex': self.varintDownsampleIndex.get(),
-            'GPUID': self.varintGPUID.get(),
-            'TileSizeIndex': self.varintTileSizeIndex.get(),
-            'LossyQuality': self.varintLossyQuality.get(),
-            'UseWebP': self.varboolUseWebP.get(),
-            'UseTTA': self.varboolUseTTA.get(),
-            'OptimizeGIF': self.varboolOptimizeGIF.get(),
-            'LossyMode': self.varboolLossyMode.get(),
-            'IgnoreError': self.varboolIgnoreError.get(),
-            'Preupscale': self.varboolPreupscale.get(),
-            'CustomCommand': self.varstrCustomCommand.get(),
+            'ResizeMode': self.resizeModeGroup.checkedId(),
+            'ResizeRatio': self.spinResizeRatio.value(),
+            'ResizeWidth': self.spinResizeWidth.value(),
+            'ResizeHeight': self.spinResizeHeight.value(),
+            'ResizeLongestSide': self.spinResizeLongestSide.value(),
+            'ResizeShortestSide': self.spinResizeShortestSide.value(),
+            'Model': self.comboModel.currentText(),
+            'DownsampleIndex': self.comboDownsample.currentIndex(),
+            'GPUID': self.spinGPUID.value(),
+            'TileSizeIndex': self.comboTileSize.currentIndex(),
+            'LossyQuality': self.spinLossyQuality.value(),
+            'UseWebP': self.checkUseWebP.isChecked(),
+            'UseTTA': self.checkUseTTA.isChecked(),
+            'OptimizeGIF': self.checkOptimizeGIF.isChecked(),
+            'LossyMode': self.checkLossyMode.isChecked(),
+            'IgnoreError': self.checkIgnoreError.isChecked(),
+            'Preupscale': self.checkPreupscale.isChecked(),
+            'CustomCommand': self.entryCustomCommand.text(),
             'AppLanguage': i18n.current_language
         }
         with open(define.APP_CONFIG_PATH, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
-    def dndSplit(self, p: str) -> tuple[str, ...]:
-        self.tcl.call('set', 'x', p)
-        r = tuple(self.tcl.eval(f'lindex $x {i}') for i in range(int(self.tcl.eval('llength $x'))))
-        self.tcl.call('unset', 'x')
-        return r
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = tuple(u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile() and u.toLocalFile())
+        if paths:
+            self.setInputPath(paths)
+        event.acceptProposedAction()
 
     def buttonInputPath_click(self):
-        if not (p := filedialog.askopenfilename(
-            filetypes=(
-                ('Image files', ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff')),
-            ),
-            multiple=True,
-        )):
+        p, _ = QFileDialog.getOpenFileNames(
+            self,
+            filter='Image files (*.jpg *.jpeg *.png *.gif *.webp *.tif *.tiff)',
+        )
+        if not p:
             return
-        self.setInputPath(p)
+        self.setInputPath(tuple(p))
 
     def buttonOutputPath_click(self):
-        if not (p := filedialog.askopenfilename(
-            filetypes=(
-                ('Image files', ('.png', '.gif', '.webp')),
-            ),
-        )):
+        p, _ = QFileDialog.getSaveFileName(
+            self,
+            filter='Image files (*.png *.gif *.webp)',
+        )
+        if not p:
             return
-        self.varstrOutputPath.set((p,))
+        self.entryOutputPath.setText(p)
 
-    def comboDownsample_click(self, event: tk.Event):
-        self.comboDownsample.select_clear()
-        self.varintDownsampleIndex.set(self.comboDownsample.current())
-
-    def comboTileSize_click(self, event: tk.Event):
-        self.comboTileSize.select_clear()
-        self.varintTileSizeIndex.set(self.comboTileSize.current())
+    def outputPathTraceCallback(self, *args):
+        if not self.outputPathChanged:
+            self.setInputPath(tuple(p.strip() for p in self.entryInputPath.text().split('|')))
 
     def buttonProcess_click(self):
-        if self.varboolProcessing.get():
-            if self.varboolProcessingPaused.get():
-                self.varboolProcessingPaused.set(False)
+        if self.processing:
+            if self.processingPaused:
+                self.processingPaused = False
                 self.pauseEvent.set()
             else:
-                self.varboolProcessingPaused.set(True)
+                self.processingPaused = True
                 self.pauseEvent.clear()
                 self.writeToOutput('Will pause after current task is completed.\n')
-            self.buttonProcess.config(style='' if self.varboolProcessing.get() and not self.varboolProcessingPaused.get() else 'Accent.TButton')
-            self.varstrLabelStartProcessing.set(i18n.getTranslatedString(('ContinueProcessing' if self.varboolProcessingPaused.get() else 'PauseProcessing') if self.varboolProcessing.get() else 'StartProcessing'))
+            self.updateProcessButton()
             return
         try:
-            inputPaths = tuple(p.strip() for p in self.varstrInputPath.get().split('|'))
-            outputPaths = tuple(p.strip() for p in self.varstrOutputPath.get().split('|'))
+            inputPaths = tuple(p.strip() for p in self.entryInputPath.text().split('|'))
+            outputPaths = tuple(p.strip() for p in self.entryOutputPath.text().split('|'))
             if not inputPaths or not outputPaths or len(inputPaths) != len(outputPaths):
-                return messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningInvalidPath'))
+                return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningInvalidPath'))
 
             initialConfigParams = self.getConfigParams()
             if initialConfigParams.resizeMode == param.ResizeMode.RATIO and initialConfigParams.resizeModeValue == 1:
-                return messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningResizeRatio'))
+                return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningResizeRatio'))
 
             self.progressValue[0] = 0
             self.progressValue[1] = 0
@@ -481,7 +550,7 @@ class REGUIApp(ttk.Frame):
                 inputPath = os.path.normpath(inputPath)
                 outputPath = os.path.normpath(outputPath)
                 if not os.path.exists(inputPath):
-                    return messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundPath'))
+                    return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundPath'))
 
                 if os.path.isdir(inputPath):
                     for curDir, dirs, files in os.walk(inputPath):
@@ -491,86 +560,68 @@ class REGUIApp(ttk.Frame):
                             f = os.path.join(curDir, f)
                             g = os.path.join(outputPath, f.removeprefix(inputPath + os.path.sep))
                             if os.path.splitext(f)[1].lower() == '.gif':
-                                queue.append(task.SplitGIFTask(self.writeToOutput, self.progressValue, f, g, initialConfigParams, queue, self.varboolOptimizeGIF.get()))
-                            elif self.varstrCustomCommand.get().strip():
+                                queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, queue, self.checkOptimizeGIF.isChecked()))
+                            elif self.entryCustomCommand.text().strip():
                                 t = tempfile.mktemp('.png')
-                                g = os.path.splitext(g)[0] + ('.webp' if self.varboolUseWebP.get() else '.png')
-                                queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, f, t, initialConfigParams))
-                                queue.append(task.CustomCompressTask(self.writeToOutput, t, g, self.varstrCustomCommand.get().strip(), True))
-                            elif self.varboolLossyMode.get():
+                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams))
+                                queue.append(task.CustomCompressTask(self.sigOutput.emit, t, g, self.entryCustomCommand.text().strip(), True))
+                            elif self.checkLossyMode.isChecked():
                                 t = tempfile.mktemp('.webp')
-                                g = os.path.splitext(g)[0] + ('.webp' if self.varboolUseWebP.get() else '.jpg')
-                                queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, f, t, initialConfigParams))
-                                queue.append(task.LossyCompressTask(self.writeToOutput, t, g, self.varintLossyQuality.get(), True))
+                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.jpg')
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams))
+                                queue.append(task.LossyCompressTask(self.sigOutput.emit, t, g, self.spinLossyQuality.value(), True))
                             else:
-                                g = os.path.splitext(g)[0] + ('.webp' if self.varboolUseWebP.get() else '.png')
-                                queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, f, g, initialConfigParams))
+                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams))
                             self.progressValue[2] += 1
                     if not queue:
-                        return messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningEmptyFolder'))
+                        return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningEmptyFolder'))
                 elif os.path.splitext(inputPath)[1].lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
                     self.progressValue[2] += 1
                     if os.path.splitext(inputPath)[1].lower() == '.gif':
-                        queue.append(task.SplitGIFTask(self.writeToOutput, self.progressValue, inputPath, outputPath, initialConfigParams, queue, self.varboolOptimizeGIF.get()))
-                    elif self.varstrCustomCommand.get().strip():
+                        queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, queue, self.checkOptimizeGIF.isChecked()))
+                    elif self.entryCustomCommand.text().strip():
                         t = tempfile.mktemp('.png')
-                        queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, inputPath, t, initialConfigParams))
-                        queue.append(task.CustomCompressTask(self.writeToOutput, t, outputPath, self.varstrCustomCommand.get().strip(), True))
-                    elif self.varboolLossyMode.get() and os.path.splitext(outputPath)[1].lower() in {'.jpg', '.jpeg', '.webp'}:
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams))
+                        queue.append(task.CustomCompressTask(self.sigOutput.emit, t, outputPath, self.entryCustomCommand.text().strip(), True))
+                    elif self.checkLossyMode.isChecked() and os.path.splitext(outputPath)[1].lower() in {'.jpg', '.jpeg', '.webp'}:
                         t = tempfile.mktemp('.webp')
-                        queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, inputPath, t, initialConfigParams))
-                        queue.append(task.LossyCompressTask(self.writeToOutput, t, outputPath, self.varintLossyQuality.get(), True))
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams))
+                        queue.append(task.LossyCompressTask(self.sigOutput.emit, t, outputPath, self.spinLossyQuality.value(), True))
                     else:
-                        queue.append(task.RESpawnTask(self.writeToOutput, self.progressValue, inputPath, outputPath, initialConfigParams))
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams))
                 else:
-                    return messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningInvalidFormat'))
+                    return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningInvalidFormat'))
 
-            self.vardoubleProgress.set(0)
+            self.setProgress(0)
             self.progressAnimation[0] = 0
             self.progressAnimation[1] = 0
             self.progressAnimation[2] = 0
-            if self.progressAnimation[3]:
-                self.progressbar.after_cancel(self.progressAnimation[3])
-                self.progressAnimation[3] = None
+            self.progressAnimTimer.stop()
 
-            self.varboolProcessing.set(True)
-            self.varboolProcessingPaused.set(False)
+            self.processing = True
+            self.processingPaused = False
             self.pauseEvent.set()
-            self.buttonProcess.config(style='' if self.varboolProcessing.get() and not self.varboolProcessingPaused.get() else 'Accent.TButton')
-            self.varstrLabelStartProcessing.set(i18n.getTranslatedString(('ContinueProcessing' if self.varboolProcessingPaused.get() else 'PauseProcessing') if self.varboolProcessing.get() else 'StartProcessing'))
-            self.textOutput.config(state=tk.NORMAL)
-            self.textOutput.delete(1.0, tk.END)
-            self.textOutput.config(state=tk.DISABLED)
+            self.updateProcessButton()
+            self.textOutput.clear()
 
             if sys.platform != 'darwin':
-                notification = notifypy.Notify(
+                self.notification = notifypy.Notify(
                     default_notification_application_name=define.APP_TITLE,
                     default_notification_icon=os.path.join(define.BASE_PATH, 'icon-128px.png'),
                 )
-            match sys.platform:
-                case 'win32':
-                    self.progressNativeTaskbar.SetProgressState(int(self.master.wm_frame(), 16), 2) # TBPF_NORMAL
-                    # 初始进度应该是0，但是直接设为0没有效果，所以改成使用非常接近0的值
-                    self.progressNativeTaskbar.SetProgressValue(int(self.master.wm_frame(), 16), 1, 0xFFFFFFFF)
+            if sys.platform == 'win32':
+                self.progressNativeTaskbar.SetProgressState(int(self.winId()), 2) # TBPF_NORMAL
+                # 初始进度应该是0，但是直接设为0没有效果，所以改成使用非常接近0的值
+                self.progressNativeTaskbar.SetProgressValue(int(self.winId()), 1, 0xFFFFFFFF)
             ts = time.perf_counter()
             def completeCallback(withError: bool):
-                te = time.perf_counter()
-                if sys.platform != 'darwin':
-                    notification.title = i18n.getTranslatedString('ToastCompletedTitle')
-                    if withError:
-                        notification.message = i18n.getTranslatedString('ToastCompletedMessageWithError').format(self.logPath)
-                    else:
-                        notification.message = i18n.getTranslatedString('ToastCompletedMessage').format(outputPath, te - ts)
-                    notification.send(False)
-                if self.progressAnimation[3]:
-                    self.progressbar.after_cancel(self.progressAnimation[3])
-                    self.progressAnimation[3] = None
-                self.vardoubleProgress.set(100)
+                self.sigComplete.emit(withError)
             def failCallback(ex: Exception):
-                if sys.platform != 'darwin':
-                    notification.title = i18n.getTranslatedString('ToastFailedTitle')
-                    notification.message = f'{type(ex).__name__}: {ex}'
-                    notification.send(False)
+                self.sigFail.emit(f'{type(ex).__name__}: {ex}')
+            self.notificationOutputPath = outputPath
+            self.notificationTimeStart = ts
 
             self.logFile = open(self.logPath, 'w', encoding='utf-8')
             t = threading.Thread(
@@ -578,93 +629,105 @@ class REGUIApp(ttk.Frame):
                 args=(
                     queue,
                     self.pauseEvent,
-                    self.writeToOutput,
+                    self.sigOutput.emit,
                     completeCallback,
                     failCallback,
-                    lambda: (
-                        self.varboolProcessing.set(False),
-                        self.pauseEvent.set(),
-                        self.buttonProcess.config(style='' if self.varboolProcessing.get() and not self.varboolProcessingPaused.get() else 'Accent.TButton'),
-                        self.varstrLabelStartProcessing.set(i18n.getTranslatedString(('ContinueProcessing' if self.varboolProcessingPaused.get() else 'PauseProcessing') if self.varboolProcessing.get() else 'StartProcessing')),
-                        self.logFile.close(),
-                        sys.platform == 'win32' and self.progressNativeTaskbar.SetProgressState(int(self.master.wm_frame(), 16), 0), # TBPF_NOPROGRESS
-                    ),
-                    self.varboolIgnoreError.get(),
+                    self.sigFinally.emit,
+                    self.checkIgnoreError.isChecked(),
                 )
             )
             t.start()
         except Exception as ex:
-            messagebox.showerror(define.APP_TITLE, traceback.format_exc())
+            QMessageBox.critical(self, define.APP_TITLE, traceback.format_exc())
+
+    def onTaskComplete(self, withError: bool):
+        te = time.perf_counter()
+        if sys.platform != 'darwin':
+            self.notification.title = i18n.getTranslatedString('ToastCompletedTitle')
+            if withError:
+                self.notification.message = i18n.getTranslatedString('ToastCompletedMessageWithError').format(self.logPath)
+            else:
+                self.notification.message = i18n.getTranslatedString('ToastCompletedMessage').format(self.notificationOutputPath, te - self.notificationTimeStart)
+            self.notification.send(False)
+        self.progressAnimTimer.stop()
+        self.setProgress(100)
+
+    def onTaskFail(self, message: str):
+        if sys.platform != 'darwin':
+            self.notification.title = i18n.getTranslatedString('ToastFailedTitle')
+            self.notification.message = message
+            self.notification.send(False)
+
+    def onTaskFinally(self):
+        self.processing = False
+        self.pauseEvent.set()
+        self.updateProcessButton()
+        self.logFile.close()
+        if sys.platform == 'win32':
+            self.progressNativeTaskbar.SetProgressState(int(self.winId()), 0) # TBPF_NOPROGRESS
 
     def setInputPath(self, paths: tuple[str, ...]):
-        self.varstrInputPath.set(' | '.join(paths))
-        self.varstrOutputPath.set(self.getOutputPath(paths))
+        self.entryInputPath.setText(' | '.join(paths))
+        self.entryOutputPath.setText(self.getOutputPath(paths))
         self.outputPathChanged = False
+
+    def setProgress(self, value: float):
+        self.progressCurrent = value
+        self.progressbar.setValue(round(value * 10))
+
+    def progressAnimStep(self):
+        self.setProgress(self.progressAnimation[0] + (self.progressAnimation[1] - self.progressAnimation[0]) * (lambda x: 1 - (1 - x) ** 3)(self.progressAnimation[2]))
+        self.progressAnimation[2] += 1 / 10
+        if self.progressAnimation[2] >= 1:
+            self.progressAnimTimer.stop()
 
     def writeToOutput(self, s: str):
         if self.logFile:
             self.logFile.write(s)
-        self.textOutput.config(state=tk.NORMAL)
-        self.textOutput.insert(tk.END, s)
-        self.textOutput.config(state=tk.DISABLED)
-        yview = self.textOutput.yview()
-        if yview[1] - yview[0] > .5 or yview[1] > .9:
-            self.textOutput.see('end')
+        self.textOutput.moveCursor(QTextCursor.MoveOperation.End)
+        self.textOutput.insertPlainText(s)
+        vsb = self.textOutput.verticalScrollBar()
+        if vsb.maximum() == 0 or vsb.pageStep() > vsb.maximum() * .5 or vsb.value() > vsb.maximum() * .9:
+            vsb.setValue(vsb.maximum())
 
-        # self.vardoubleProgress.set((self.progressValue[0] + self.progressValue[1]) / self.progressValue[2] * 100)
-        progressFrom = self.vardoubleProgress.get()
+        progressFrom = self.progressCurrent
         progressTo = (self.progressValue[0] + self.progressValue[1]) / self.progressValue[2] * 100
         if progressFrom != progressTo:
-            def anim():
-                if self.progressAnimation[3] is None:
-                    return
-                # print(f'Before anim {self.progressAnimation}')
-                self.vardoubleProgress.set(self.progressAnimation[0] + (self.progressAnimation[1] - self.progressAnimation[0]) * (lambda x: 1 - (1 - x) ** 3)(self.progressAnimation[2]))
-                self.progressAnimation[2] += 1 / 10
-                if self.progressAnimation[2] < 1:
-                    self.progressAnimation[3] = self.progressbar.after(10, anim)
-                else:
-                    self.progressAnimation[3] = None
-                # print(f'After anim  {self.progressAnimation}')
-            if self.progressAnimation[3]:
-                afterId = self.progressAnimation[3]
-                self.progressAnimation[3] = None
-                self.progressbar.after_cancel(afterId)
-                # print(f'Cancel {afterId}')
+            self.progressAnimTimer.stop()
             self.progressAnimation[0] = progressFrom
             self.progressAnimation[1] = progressTo
             self.progressAnimation[2] = 0
-            self.progressAnimation[3] = self.progressbar.after(10, anim)
-            match sys.platform:
-                case 'win32':
-                    self.progressNativeTaskbar.SetProgressState(int(self.master.wm_frame(), 16), 2) # TBPF_NORMAL
-                    self.progressNativeTaskbar.SetProgressValue(int(self.master.wm_frame(), 16), round(progressTo), 100)
+            self.progressAnimTimer.start()
+            if sys.platform == 'win32':
+                self.progressNativeTaskbar.SetProgressState(int(self.winId()), 2) # TBPF_NORMAL
+                self.progressNativeTaskbar.SetProgressValue(int(self.winId()), round(progressTo), 100)
 
     def getConfigParams(self) -> param.REConfigParams:
+        resizeMode = param.ResizeMode(self.resizeModeGroup.checkedId())
         resizeModeValue = 0
-        match self.varintResizeMode.get():
+        match resizeMode:
             case param.ResizeMode.RATIO:
-                resizeModeValue = self.varintResizeRatio.get()
+                resizeModeValue = self.spinResizeRatio.value()
             case param.ResizeMode.WIDTH:
-                resizeModeValue = self.varintResizeWidth.get()
+                resizeModeValue = self.spinResizeWidth.value()
             case param.ResizeMode.HEIGHT:
-                resizeModeValue = self.varintResizeHeight.get()
+                resizeModeValue = self.spinResizeHeight.value()
             case param.ResizeMode.LONGEST_SIDE:
-                resizeModeValue = self.varintResizeLongestSide.get()
+                resizeModeValue = self.spinResizeLongestSide.value()
             case param.ResizeMode.SHORTEST_SIDE:
-                resizeModeValue = self.varintResizeShortestSide.get()
+                resizeModeValue = self.spinResizeShortestSide.value()
         return param.REConfigParams(
-            self.varstrModel.get(),
-            self.modelFactors[self.varstrModel.get()],
+            self.comboModel.currentText(),
+            self.modelFactors[self.comboModel.currentText()],
             self.config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models'),
-            self.varintResizeMode.get(),
+            resizeMode,
             resizeModeValue,
-            self.downsample[self.varintDownsampleIndex.get()][1],
-            self.tileSize[self.varintTileSizeIndex.get()],
-            self.varintGPUID.get(),
-            self.varboolUseTTA.get(),
-            self.varboolPreupscale.get(),
-            self.varstrCustomCommand.get().strip(),
+            self.downsample[self.comboDownsample.currentIndex()][1],
+            self.tileSize[self.comboTileSize.currentIndex()],
+            self.spinGPUID.value(),
+            self.checkUseTTA.isChecked(),
+            self.checkPreupscale.isChecked(),
+            self.entryCustomCommand.text().strip(),
         )
 
     def getOutputPath(self, paths: tuple[str, ...]) -> str:
@@ -674,23 +737,23 @@ class REGUIApp(ttk.Frame):
                 base, ext = p, ''
             else:
                 base, ext = os.path.splitext(p)
-                if ext.lower() in {'.jpg', '.tif', '.tiff'} or self.varstrCustomCommand.get().strip():
+                if ext.lower() in {'.jpg', '.tif', '.tiff'} or self.entryCustomCommand.text().strip():
                     ext = '.png'
-                if ext.lower() == '.png' and self.varboolUseWebP.get():
+                if ext.lower() == '.png' and self.checkUseWebP.isChecked():
                     ext = '.webp'
             suffix = ''
-            match self.varintResizeMode.get():
+            match param.ResizeMode(self.resizeModeGroup.checkedId()):
                 case param.ResizeMode.RATIO:
-                    suffix = f'x{self.varintResizeRatio.get()}'
+                    suffix = f'x{self.spinResizeRatio.value()}'
                 case param.ResizeMode.WIDTH:
-                    suffix = f'w{self.varintResizeWidth.get()}'
+                    suffix = f'w{self.spinResizeWidth.value()}'
                 case param.ResizeMode.HEIGHT:
-                    suffix = f'h{self.varintResizeHeight.get()}'
+                    suffix = f'h{self.spinResizeHeight.value()}'
                 case param.ResizeMode.LONGEST_SIDE:
-                    suffix = f'l{self.varintResizeLongestSide.get()}'
+                    suffix = f'l{self.spinResizeLongestSide.value()}'
                 case param.ResizeMode.SHORTEST_SIDE:
-                    suffix = f's{self.varintResizeShortestSide.get()}'
-            r.append(f'{base} ({self.models[self.comboModel.current()]} {suffix}){ext}')
+                    suffix = f's{self.spinResizeShortestSide.value()}'
+            r.append(f'{base} ({self.comboModel.currentText()} {suffix}){ext}')
         return ' | '.join(r)
 
 # Config and model paths are initialized before main frame
@@ -763,76 +826,44 @@ def init_config_and_model_paths() -> tuple[configparser.ConfigParser, list[str]]
 
 if __name__ == '__main__':
     os.chdir(define.APP_PATH)
-    root = TkinterDnD.Tk(className=define.APP_TITLE)
-    root.withdraw()
+    qapp = QApplication(sys.argv)
+    qapp.setApplicationName(define.APP_TITLE)
 
     config, models = init_config_and_model_paths()
 
     if not os.path.exists(define.RE_PATH) or not models:
-        messagebox.showwarning(define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundRE'))
+        QMessageBox.warning(None, define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundRE'))
         webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN/releases')
         sys.exit(0)
 
-    root.title(define.APP_TITLE)
-    try:
-        root.iconbitmap(os.path.join(define.BASE_PATH, 'icon-256px.ico'))
-    except tk.TclError:
-        root.tk.call('wm', 'iconphoto', root._w, ImageTk.PhotoImage(Image.open(os.path.join(define.BASE_PATH, 'icon-256px.ico'))))
+    app = REGUIApp(config, models)
+    app.setWindowTitle(define.APP_TITLE)
+    app.setWindowIcon(QIcon(os.path.join(define.BASE_PATH, 'icon-256px.ico')))
 
-    root.tk.call('source', os.path.join(define.BASE_PATH, 'theme', 'sun-valley.tcl'))
-    def changeTheme(theme: typing.Literal['Dark', 'Light']):
-        root.tk.call('set_theme', 'dark' if theme == 'Dark' else 'light')
-        # https://stackoverflow.com/questions/57124243/winforms-dark-title-bar-on-windows-10
-        if sys.platform == 'win32':
-            match sys.getwindowsversion().build:
-                case build if build >= 18985:
-                    attribute = 20
-                case build if build >= 17763:
-                    attribute = 19
-                case _:
-                    attribute = None
-            if attribute:
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    ctypes.windll.user32.GetParent(root.winfo_id()),
-                    attribute,
-                    ctypes.byref(ctypes.c_int(theme == 'Dark')),
-                    ctypes.sizeof(ctypes.c_int),
-                )
     try:
         import darkdetect
-        changeTheme(darkdetect.theme())
+        app.applyTheme(darkdetect.theme())
         if sys.platform in {'win32', 'linux'}:
-            t = threading.Thread(target=darkdetect.listener, args=(changeTheme,))
+            t = threading.Thread(target=darkdetect.listener, args=(app.sigTheme.emit,))
             t.daemon = True
             t.start()
-    except:
+    except Exception:
         print(traceback.format_exc())
-        changeTheme('Light')
-
-    app = REGUIApp(root, config, models)
-    app.drop_target_register(DND_FILES)
-    app.dnd_bind(
-        '<<Drop>>',
-        lambda e: app.setInputPath(app.dndSplit(e.data)),
-    )
-    app.pack(fill=tk.BOTH, expand=True)
-    root.protocol('WM_DELETE_WINDOW', lambda: (
-        app.close(),
-        root.destroy(),
-    ))
+        app.applyTheme('Light')
 
     initialSize = (720, 640)
-    root.minsize(*initialSize)
-    root.geometry('{}x{}+{}+{}'.format(
-        *initialSize,
-        (root.winfo_screenwidth() - initialSize[0]) // 2,
-        (root.winfo_screenheight() - initialSize[1]) // 2,
-    ))
+    app.setMinimumSize(*initialSize)
+    app.resize(*initialSize)
+    screenGeometry = qapp.primaryScreen().availableGeometry()
+    app.move(
+        screenGeometry.x() + (screenGeometry.width() - initialSize[0]) // 2,
+        screenGeometry.y() + (screenGeometry.height() - initialSize[1]) // 2,
+    )
 
     # 最好用的一个 要是第一次通过拖放打开文件路径就好了 · Issue #45 · TransparentLC/realesrgan-gui
     # https://github.com/TransparentLC/realesrgan-gui/issues/45
     if len(sys.argv) > 1:
         app.setInputPath(sys.argv[1:])
 
-    root.deiconify()
-    root.mainloop()
+    app.show()
+    sys.exit(qapp.exec())

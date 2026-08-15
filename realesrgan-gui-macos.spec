@@ -27,18 +27,11 @@ a = Analysis(
     # 需要打包的数据文件
     datas=[
         ('models', 'models'),
-        ('theme', 'theme'),
         ('i18n.ini', '.'),
         ('icon.icns', '.'),
         ('icon-128px.png', '.'),
-    ],
-    # 隐藏导入
-    hiddenimports=[
-        'PIL._tkinter_finder',
-    ],
-    # PyInstaller钩子目录
-    hookspath=[
-        'pyi-hooks',
+        # qdarktheme 的 QSS/图标等资源
+        *collect_data_files('qdarktheme'),
     ],
     # 排除不需要的模块
     excludes=[
@@ -49,6 +42,7 @@ a = Analysis(
         '_lzma',
         '_queue',
         '_ssl',
+        'tkinter',
         'unicodedata',
     ],
 )
@@ -61,22 +55,6 @@ a.binaries = [
     if not any(x[0].startswith(y) for y in {
         'api-ms-win-',
         'ucrtbase.dll',
-    })
-]
-
-# 从datas中排除不需要的tcl/tk文件，经测试这些文件实际上没有用到
-a.datas = [
-    x
-    for x in a.datas
-    if not any(x[0].startswith(y) for y in {
-        os.path.join('tcl', 'encoding'),
-        os.path.join('tcl', 'http'),
-        os.path.join('tcl', 'msgs'),
-        os.path.join('tcl', 'opt'),
-        os.path.join('tcl', 'tzdata'),
-        os.path.join('tcl8'),
-        os.path.join('tk', 'images'),
-        os.path.join('tk', 'msgs'),
     })
 ]
 

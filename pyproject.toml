@@ -11,5 +11,11 @@ dependencies = [
     "darkdetect[macos-listener]==0.8.* ; sys_platform == 'darwin'",
     "notify-py>=0.3.43,<0.4.0 ; sys_platform != 'darwin'",
     "pillow==12.*",
-    "tkinterdnd2>=0.4.2",
+    "PySide6==6.9.*",
+    "pyqtdarktheme>=2.1.0,<3.0.0",
 ]
+
+[tool.uv]
+# pyqtdarktheme 2.1.0 将 darkdetect 保守锁定在 <0.8.0，
+# 实测 0.8.* 与其完全兼容，这里覆盖解析结果以保持与上游项目一致的 0.8.*
+override-dependencies = ["darkdetect==0.8.*"]

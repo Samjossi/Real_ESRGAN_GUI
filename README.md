@@ -23,7 +23,7 @@
 
 ## 基本介绍
 
-这个程序是 Real-ESRGAN 的命令行程序 [Real-ESRGAN-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) 的图形界面，使用 Python 和 tkinter 编写，同时支持 Windows、Ubuntu 和 macOS 平台。
+这个程序是 Real-ESRGAN 的命令行程序 [Real-ESRGAN-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) 的图形界面，使用 Python 和 PySide6（Qt）编写，同时支持 Windows、Ubuntu 和 macOS 平台。
 
 快速上手：
 
@@ -230,8 +230,8 @@ Real-ESRGAN 的 GUI 当然不止一个，这里列出了其中的一部分，并
 
 * [Pillow](https://github.com/python-pillow/Pillow)
 * [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) 原版工具
-* [Sun-Valley-ttk-theme](https://github.com/rdbende/Sun-Valley-ttk-theme) Windows 11 风格的 tkinter 主题，在原版基础上将所有控件的图片打包成了单张 Sprite Sheet，具体操作参见[这里](https://github.com/rdbende/Sun-Valley-ttk-theme/issues/30)
-* [TkInterDnD2](https://github.com/pmgagne/tkinterdnd2) Tkinter 的拖拽支持
+* [PySide6](https://doc.qt.io/qtforpython-6/) Qt 的 Python 绑定，提供跨平台的图形界面
+* [pyqtdarktheme](https://github.com/5yutan5/PyQtDarkTheme) Qt 的深色/浅色主题，可跟随系统自动切换
 * [darkdetect](https://github.com/albertosottile/darkdetect) 检测是否正在使用深色模式
 * [pyinstaller](https://github.com/pyinstaller/pyinstaller)
 
