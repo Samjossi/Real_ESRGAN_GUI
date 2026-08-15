@@ -152,3 +152,6 @@ vcomp140.dll
 vcomp140d.dll
 
 config.ini
+
+# 临时文件与测试数据
+tmp/
