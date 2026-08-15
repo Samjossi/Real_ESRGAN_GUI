@@ -1,9 +1,6 @@
-comtypes == 1.*; sys_platform == 'win32'
 darkdetect == 0.8.*; sys_platform != 'darwin'
 darkdetect[macos-listener] == 0.8.*; sys_platform == 'darwin'
 notify-py >= 0.3.43, < 0.4.0; sys_platform != 'darwin'
 pillow == 12.*
 PySide6 == 6.9.*
 pyqtdarktheme >= 2.1.0, < 3.0.0
-# For locale names
-babel >= 2.14.0, < 3.0.0

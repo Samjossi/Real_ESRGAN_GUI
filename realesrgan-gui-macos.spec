@@ -27,7 +27,6 @@ a = Analysis(
     # 需要打包的数据文件
     datas=[
         ('models', 'models'),
-        ('i18n.ini', '.'),
         ('icon.icns', '.'),
         ('icon-128px.png', '.'),
         # qdarktheme 的 QSS/图标等资源

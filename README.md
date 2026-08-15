@@ -10,9 +10,6 @@
 <summary>README translations</summary>
 
 * [简体中文 (Simplified Chinese)](https://github.com/TransparentLC/realesrgan-gui/blob/master/README.md)
-* [English](https://github.com/TransparentLC/realesrgan-gui/blob/master/README.en-US.md)
-* [Ukrainian (Українська)](https://github.com/TransparentLC/realesrgan-gui/blob/master/README.uk-UA.md) Translated by [@kirill0ermakov](https://github.com/kirill0ermakov)
-* [Türkçe (Turkish)](https://github.com/TransparentLC/realesrgan-gui/blob/master/README.tr-TR.md) Translated by [@NandeMD](https://github.com/NandeMD)
 
 </details>
 
@@ -92,10 +89,6 @@ curl -L https://raw.githubusercontent.com/TransparentLC/realesrgan-gui/master/ma
     * 使用 [darkdetect](https://github.com/albertosottile/darkdetect) 实现。
     * 在启动时根据系统设定选择使用浅色或深色模式界面，支持在修改系统设定时自动切换。
     * 在 macOS 上不适用（？）
-* 多语言支持
-    * 界面语言和系统语言（使用 `locale.getdefaultlocale` 获取）一致。
-    * 目前支持简繁中文和英语。在缺少某个语言的翻译文本的情况下，默认会回退到英语。
-    * **欢迎添加更多语言的翻译，或对现有的翻译进行改进～**（参见 [`i18n.ini`](https://github.com/TransparentLC/realesrgan-gui/blob/master/i18n.ini)）
 
 ## 效果对比
 

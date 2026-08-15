@@ -5,11 +5,8 @@ from PyInstaller.utils.hooks import collect_data_files
 a = Analysis(
     ['main.py'],
     datas=[
-        ('i18n.ini', '.'),
         ('icon-256px.ico', '.'),
         ('icon-128px.png', '.'),
-        # Windows下在任务栏显示进度条
-        *((('TaskbarLib.tlb', '.'),) if sys.platform == 'win32' else ()),
         # macOS下通过app实现通知，打包时需要附带
         *collect_data_files('notifypy'),
         # qdarktheme 的 QSS/图标等资源

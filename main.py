@@ -1,7 +1,6 @@
 import collections
 import configparser
 import itertools
-import locale
 import notifypy
 import os
 import re
@@ -14,7 +13,6 @@ import typing
 import webbrowser
 from PIL import Image
 from PySide6.QtCore import Qt
-from PySide6.QtCore import QTimer
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtGui import QIcon
@@ -44,7 +42,6 @@ from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
 import define
-import i18n
 import param
 import task
 
@@ -79,14 +76,14 @@ QProgressBar[state="stopped"]::chunk {
 }
 '''
 
-# 文件列表行状态 -> i18n 文案键
-ITEM_STATE_LABEL_KEYS = {
-    'waiting': 'ItemStateWaiting',
-    'processing': 'ItemStateProcessing',
-    'done': 'ItemStateDone',
-    'failed': 'ItemStateFailed',
-    'stopped': 'ItemStateStopped',
-    'skipped': 'ItemStateSkipped',
+# 文件列表行状态 -> 显示文案
+ITEM_STATE_LABELS = {
+    'waiting': '等待中',
+    'processing': '处理中',
+    'done': '完成',
+    'failed': '失败',
+    'stopped': '已停止',
+    'skipped': '未处理',
 }
 
 class REGUIApp(QMainWindow):
@@ -132,29 +129,11 @@ class REGUIApp(QMainWindow):
         self.outputPathChanged = True
         self.logPath = os.path.join(define.APP_PATH, 'output.log')
         self.logFile: typing.IO = None
-        # 当前的放大进度（0~1）/已放大的文件/总共要放大的文件
+        # 任务共享进度：当前文件进度（0~1）/已完成文件数/总文件数（由 task.py 写入）
         self.progressValue: list[int | float] = [0, 0, 1]
-        # 初始值/结束值/进度（进度条动画，三次方缓动）
-        self.progressAnimation: list[float] = [0, 0, 0]
-        self.progressCurrent = 0.0
-        self.progressAnimTimer = QTimer(self, interval=10)
-        self.progressAnimTimer.timeout.connect(self.progressAnimStep)
         # 处理状态
         self.processing = False
         self.processingPaused = False
-        # 当前正在处理的文件列表行号（驱动“当前文件”进度条）
-        self.currentItemId: int | None = None
-        # 任务栏进度条
-        if sys.platform == 'win32':
-            import comtypes.client
-            comtypes.client.GetModule(os.path.join(define.BASE_PATH, 'TaskbarLib.tlb'))
-            import comtypes.gen.TaskbarLib
-            self.progressNativeTaskbar = comtypes.client.CreateObject('{56FDF344-FD6D-11d0-958A-006097C9A090}', interface=comtypes.gen.TaskbarLib.ITaskbarList3)
-            self.progressNativeTaskbar.HrInit()
-            self.progressNativeTaskbar.ActivateTab(int(self.winId()))
-            self.progressNativeTaskbar.SetProgressState(int(self.winId()), 0) # TBPF_NOPROGRESS
-        else:
-            self.progressNativeTaskbar = None
         # 控制是否暂停
         self.pauseEvent = threading.Event()
         # 控制是否停止（取消）处理
@@ -189,24 +168,24 @@ class REGUIApp(QMainWindow):
         basicLayout = QVBoxLayout(self.frameBasicConfig)
         basicLayout.setContentsMargins(5, 5, 5, 5)
 
-        self.labelInputPath = QLabel(self.frameBasicConfig)
+        self.labelInputPath = QLabel('输入（文件或文件夹）', self.frameBasicConfig)
         basicLayout.addWidget(self.labelInputPath)
         inputRow = QHBoxLayout()
         self.entryInputPath = QLineEdit(self.frameBasicConfig)
         inputRow.addWidget(self.entryInputPath, 1)
-        self.buttonInputPath = QPushButton(self.frameBasicConfig)
+        self.buttonInputPath = QPushButton('浏览', self.frameBasicConfig)
         self.buttonInputPath.clicked.connect(self.buttonInputPath_click)
         inputRow.addWidget(self.buttonInputPath)
         basicLayout.addLayout(inputRow)
 
-        self.labelOutputPath = QLabel(self.frameBasicConfig)
+        self.labelOutputPath = QLabel('输出', self.frameBasicConfig)
         basicLayout.addWidget(self.labelOutputPath)
         outputRow = QHBoxLayout()
         self.entryOutputPath = QLineEdit(self.frameBasicConfig)
         # 手动修改输出路径后，缩放参数变化时不再自动重算
         self.entryOutputPath.textEdited.connect(lambda: setattr(self, 'outputPathChanged', True))
         outputRow.addWidget(self.entryOutputPath, 1)
-        self.buttonOutputPath = QPushButton(self.frameBasicConfig)
+        self.buttonOutputPath = QPushButton('浏览', self.frameBasicConfig)
         self.buttonOutputPath.clicked.connect(self.buttonOutputPath_click)
         outputRow.addWidget(self.buttonOutputPath)
         basicLayout.addLayout(outputRow)
@@ -215,26 +194,26 @@ class REGUIApp(QMainWindow):
         frameResize = QWidget(self.frameBasicConfig)
         resizeLayout = QGridLayout(frameResize)
         resizeLayout.setContentsMargins(0, 0, 0, 0)
-        self.labelResizeMode = QLabel(frameResize)
+        self.labelResizeMode = QLabel('放大尺寸计算方式', frameResize)
         resizeLayout.addWidget(self.labelResizeMode, 0, 0, 1, 2)
         self.resizeModeGroup = QButtonGroup(self)
-        self.radioResizeRatio = QRadioButton(frameResize)
+        self.radioResizeRatio = QRadioButton('倍率', frameResize)
         self.spinResizeRatio = QSpinBox(frameResize, minimum=2, maximum=16)
         resizeLayout.addWidget(self.radioResizeRatio, 1, 0)
         resizeLayout.addWidget(self.spinResizeRatio, 1, 1)
-        self.radioResizeWidth = QRadioButton(frameResize)
+        self.radioResizeWidth = QRadioButton('宽度', frameResize)
         self.spinResizeWidth = QSpinBox(frameResize, minimum=1, maximum=16383)
         resizeLayout.addWidget(self.radioResizeWidth, 2, 0)
         resizeLayout.addWidget(self.spinResizeWidth, 2, 1)
-        self.radioResizeHeight = QRadioButton(frameResize)
+        self.radioResizeHeight = QRadioButton('高度', frameResize)
         self.spinResizeHeight = QSpinBox(frameResize, minimum=1, maximum=16383)
         resizeLayout.addWidget(self.radioResizeHeight, 3, 0)
         resizeLayout.addWidget(self.spinResizeHeight, 3, 1)
-        self.radioResizeLongestSide = QRadioButton(frameResize)
+        self.radioResizeLongestSide = QRadioButton('较长边', frameResize)
         self.spinResizeLongestSide = QSpinBox(frameResize, minimum=1, maximum=16383)
         resizeLayout.addWidget(self.radioResizeLongestSide, 4, 0)
         resizeLayout.addWidget(self.spinResizeLongestSide, 4, 1)
-        self.radioResizeShortestSide = QRadioButton(frameResize)
+        self.radioResizeShortestSide = QRadioButton('较短边', frameResize)
         self.spinResizeShortestSide = QSpinBox(frameResize, minimum=1, maximum=16383)
         resizeLayout.addWidget(self.radioResizeShortestSide, 5, 0)
         resizeLayout.addWidget(self.spinResizeShortestSide, 5, 1)
@@ -249,13 +228,13 @@ class REGUIApp(QMainWindow):
         bottomRow.addWidget(frameResize, 1)
 
         rightColumn = QVBoxLayout()
-        self.labelUsedModel = QLabel(self.frameBasicConfig)
+        self.labelUsedModel = QLabel('模型', self.frameBasicConfig)
         rightColumn.addWidget(self.labelUsedModel)
         self.comboModel = QComboBox(self.frameBasicConfig)
         self.comboModel.addItems(self.models)
         rightColumn.addWidget(self.comboModel)
         rightColumn.addStretch(1)
-        self.buttonStop = QPushButton(self.frameBasicConfig)
+        self.buttonStop = QPushButton('停止', self.frameBasicConfig)
         self.buttonStop.setEnabled(False)
         self.buttonStop.clicked.connect(self.buttonStop_click)
         rightColumn.addWidget(self.buttonStop, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
@@ -273,29 +252,32 @@ class REGUIApp(QMainWindow):
         leftColumn = QVBoxLayout()
         downTileRow = QHBoxLayout()
         downColumn = QVBoxLayout()
-        self.labelDownsampleMode = QLabel(self.frameAdvancedConfig)
+        self.labelDownsampleMode = QLabel('降采样方式', self.frameAdvancedConfig)
         downColumn.addWidget(self.labelDownsampleMode)
         self.comboDownsample = QComboBox(self.frameAdvancedConfig)
         self.comboDownsample.addItems(tuple(x[0] for x in self.downsample))
         downColumn.addWidget(self.comboDownsample)
         downTileRow.addLayout(downColumn, 1)
         tileColumn = QVBoxLayout()
-        self.labelTileSize = QLabel(self.frameAdvancedConfig)
+        self.labelTileSize = QLabel('拆分大小', self.frameAdvancedConfig)
         tileColumn.addWidget(self.labelTileSize)
         self.comboTileSize = QComboBox(self.frameAdvancedConfig)
+        # 首项「自动决定」对应 tileSize[0] = 0，其余为固定拆分尺寸
+        self.comboTileSize.addItem('自动决定')
+        self.comboTileSize.addItems(tuple(str(x) for x in self.tileSize[1:]))
         tileColumn.addWidget(self.comboTileSize)
         downTileRow.addLayout(tileColumn, 1)
         leftColumn.addLayout(downTileRow)
 
-        self.labelUsedGPUID = QLabel(self.frameAdvancedConfig)
+        self.labelUsedGPUID = QLabel('使用的 GPU ID（-1 为自动选择）', self.frameAdvancedConfig)
         leftColumn.addWidget(self.labelUsedGPUID)
         self.spinGPUID = QSpinBox(self.frameAdvancedConfig, minimum=-1, maximum=7)
         leftColumn.addWidget(self.spinGPUID)
-        self.labelLossyModeQuality = QLabel(self.frameAdvancedConfig)
+        self.labelLossyModeQuality = QLabel('有损压缩质量（0-100）', self.frameAdvancedConfig)
         leftColumn.addWidget(self.labelLossyModeQuality)
         self.spinLossyQuality = QSpinBox(self.frameAdvancedConfig, minimum=0, maximum=100, singleStep=5)
         leftColumn.addWidget(self.spinLossyQuality)
-        self.labelCustomCommand = QLabel(self.frameAdvancedConfig)
+        self.labelCustomCommand = QLabel('自定义压缩/后期处理命令', self.frameAdvancedConfig)
         leftColumn.addWidget(self.labelCustomCommand)
         self.entryCustomCommand = QLineEdit(self.frameAdvancedConfig)
         leftColumn.addWidget(self.entryCustomCommand)
@@ -303,21 +285,18 @@ class REGUIApp(QMainWindow):
         advancedLayout.addLayout(leftColumn, 1)
 
         rightColumnAdv = QVBoxLayout()
-        self.checkUseWebP = QCheckBox(self.frameAdvancedConfig)
+        self.checkUseWebP = QCheckBox('优先保存为无损 WebP', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkUseWebP)
-        self.checkUseTTA = QCheckBox(self.frameAdvancedConfig)
+        self.checkUseTTA = QCheckBox('使用 TTA 模式（速度大幅下降，稍微提高质量）', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkUseTTA)
-        self.checkOptimizeGIF = QCheckBox(self.frameAdvancedConfig)
+        self.checkOptimizeGIF = QCheckBox('针对 GIF 的透明色进行额外处理（实验性功能）', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkOptimizeGIF)
-        self.checkLossyMode = QCheckBox(self.frameAdvancedConfig)
+        self.checkLossyMode = QCheckBox('使用有损压缩（JPEG/WebP）', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkLossyMode)
-        self.checkIgnoreError = QCheckBox(self.frameAdvancedConfig)
+        self.checkIgnoreError = QCheckBox('在批处理过程中忽略错误并继续处理', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkIgnoreError)
-        self.checkPreupscale = QCheckBox(self.frameAdvancedConfig)
+        self.checkPreupscale = QCheckBox('尝试预先使用常规算法放大', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkPreupscale)
-        self.comboLanguage = QComboBox(self.frameAdvancedConfig)
-        self.comboLanguage.addItems(tuple(i18n.locales_map.keys()))
-        rightColumnAdv.addWidget(self.comboLanguage)
         rightColumnAdv.addStretch(1)
         advancedLayout.addLayout(rightColumnAdv, 3)
 
@@ -339,16 +318,16 @@ class REGUIApp(QMainWindow):
         labelAuthor.setAlignment(Qt.AlignmentFlag.AlignCenter)
         aboutLayout.addWidget(labelAuthor)
         aboutButtonGrid = QGridLayout()
-        self.buttonViewREGUISource = QPushButton(self.frameAbout)
+        self.buttonViewREGUISource = QPushButton('查看源代码', self.frameAbout)
         self.buttonViewREGUISource.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui'))
         aboutButtonGrid.addWidget(self.buttonViewREGUISource, 0, 0)
-        self.buttonViewRESource = QPushButton(self.frameAbout)
+        self.buttonViewRESource = QPushButton('查看 Real-ESRGAN 介绍', self.frameAbout)
         self.buttonViewRESource.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan'))
         aboutButtonGrid.addWidget(self.buttonViewRESource, 0, 1)
-        self.buttonViewAdditionalModel = QPushButton(self.frameAbout)
+        self.buttonViewAdditionalModel = QPushButton('下载附加模型', self.frameAbout)
         self.buttonViewAdditionalModel.clicked.connect(lambda: webbrowser.open_new_tab('https://github.com/TransparentLC/realesrgan-gui/releases/tag/additional-models'))
         aboutButtonGrid.addWidget(self.buttonViewAdditionalModel, 1, 0)
-        self.buttonViewDonatePage = QPushButton(self.frameAbout)
+        self.buttonViewDonatePage = QPushButton('捐赠支持开发者', self.frameAbout)
         self.buttonViewDonatePage.clicked.connect(lambda: webbrowser.open_new_tab('https://i.akarin.dev/donate/'))
         aboutButtonGrid.addWidget(self.buttonViewDonatePage, 1, 1)
         aboutButtonRow = QHBoxLayout()
@@ -358,13 +337,14 @@ class REGUIApp(QMainWindow):
         aboutLayout.addLayout(aboutButtonRow)
         aboutLayout.addStretch(1)
 
-        self.notebookConfig.addTab(self.frameBasicConfig, '')
-        self.notebookConfig.addTab(self.frameAdvancedConfig, '')
-        self.notebookConfig.addTab(self.frameAbout, '')
+        self.notebookConfig.addTab(self.frameBasicConfig, '基本设定')
+        self.notebookConfig.addTab(self.frameAdvancedConfig, '高级设定')
+        self.notebookConfig.addTab(self.frameAbout, '关于')
 
         # ---- 文件列表（逐项显示处理状态与进度） ----
         self.treeFiles = QTreeWidget(self)
         self.treeFiles.setColumnCount(3)
+        self.treeFiles.setHeaderLabels(('文件', '状态', '进度'))
         self.treeFiles.setRootIsDecorated(False)
         self.treeFiles.setUniformRowHeights(True)
         self.treeFiles.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -372,19 +352,10 @@ class REGUIApp(QMainWindow):
         self.treeFiles.setColumnWidth(2, 160)
         centralLayout.addWidget(self.treeFiles, 1)
 
-        # ---- 日志输出与进度条 ----
+        # ---- 日志输出 ----
         self.textOutput = QPlainTextEdit(self)
         self.textOutput.setReadOnly(True)
         centralLayout.addWidget(self.textOutput, 1)
-
-        # 当前正在处理的这一张图的进度（0~1 对应 0~1000）
-        self.progressbarCurrentFile = QProgressBar(self, minimum=0, maximum=1000)
-        self.progressbarCurrentFile.setValue(0)
-        centralLayout.addWidget(self.progressbarCurrentFile)
-
-        self.progressbar = QProgressBar(self, minimum=0, maximum=1000)
-        self.progressbar.setValue(0)
-        centralLayout.addWidget(self.progressbar)
 
         # ---- 从配置恢复初始值 ----
         c = self.config['Config']
@@ -409,9 +380,8 @@ class REGUIApp(QMainWindow):
         self.checkIgnoreError.setChecked(c.getboolean('IgnoreError'))
         self.checkPreupscale.setChecked(c.getboolean('Preupscale'))
         self.entryCustomCommand.setText(c.get('CustomCommand'))
-        self.comboLanguage.setCurrentIndex(i18n.get_current_locale_display_name())
 
-        self.retranslateUi()
+        self.updateProcessButton()
         self.comboTileSize.setCurrentIndex(c.getint('TileSizeIndex'))
 
         # ---- 信号连接（初始值恢复完成后再连，避免误触发输出路径重算）----
@@ -422,64 +392,14 @@ class REGUIApp(QMainWindow):
         self.spinResizeLongestSide.valueChanged.connect(self.outputPathTraceCallback)
         self.spinResizeShortestSide.valueChanged.connect(self.outputPathTraceCallback)
         self.comboModel.currentTextChanged.connect(self.outputPathTraceCallback)
-        self.comboLanguage.currentIndexChanged.connect(self.change_app_lang)
 
         # 子控件默认会接受文本拖拽，关闭后拖拽事件才会冒泡到主窗口统一处理
         for w in (self.entryInputPath, self.entryOutputPath, self.entryCustomCommand, self.textOutput):
             w.setAcceptDrops(False)
         self.setAcceptDrops(True)
 
-    def retranslateUi(self):
-        self.notebookConfig.setTabText(0, i18n.getTranslatedString('FrameBasicConfig'))
-        self.notebookConfig.setTabText(1, i18n.getTranslatedString('FrameAdvancedConfig'))
-        self.notebookConfig.setTabText(2, i18n.getTranslatedString('FrameAbout'))
-
-        self.labelInputPath.setText(i18n.getTranslatedString('Input'))
-        self.labelOutputPath.setText(i18n.getTranslatedString('Output'))
-        self.buttonInputPath.setText(i18n.getTranslatedString('OpenFileDialog'))
-        self.buttonOutputPath.setText(i18n.getTranslatedString('OpenFileDialog'))
-        self.labelUsedModel.setText(i18n.getTranslatedString('UsedModel'))
-        self.labelResizeMode.setText(i18n.getTranslatedString('ResizeMode'))
-        self.radioResizeRatio.setText(i18n.getTranslatedString('ResizeModeRatio'))
-        self.radioResizeWidth.setText(i18n.getTranslatedString('ResizeModeWidth'))
-        self.radioResizeHeight.setText(i18n.getTranslatedString('ResizeModeHeight'))
-        self.radioResizeLongestSide.setText(i18n.getTranslatedString('ResizeModeLongestSide'))
-        self.radioResizeShortestSide.setText(i18n.getTranslatedString('ResizeModeShortestSide'))
-        self.buttonStop.setText(i18n.getTranslatedString('StopProcessing'))
-        self.treeFiles.setHeaderLabels((
-            i18n.getTranslatedString('ItemColumnFile'),
-            i18n.getTranslatedString('ItemColumnState'),
-            i18n.getTranslatedString('ItemColumnProgress'),
-        ))
-        self.updateProcessButton()
-        self.labelDownsampleMode.setText(i18n.getTranslatedString('DownsampleMode'))
-
-        self.labelTileSize.setText(i18n.getTranslatedString('TileSize'))
-        # Tile 尺寸下拉首项是翻译文本，需要随语言切换重译
-        tileSizeIndex = self.comboTileSize.currentIndex()
-        self.comboTileSize.blockSignals(True)
-        self.comboTileSize.clear()
-        self.comboTileSize.addItem(i18n.getTranslatedString('TileSizeAuto'))
-        self.comboTileSize.addItems(tuple(str(x) for x in self.tileSize[1:]))
-        self.comboTileSize.setCurrentIndex(max(tileSizeIndex, 0))
-        self.comboTileSize.blockSignals(False)
-
-        self.labelUsedGPUID.setText(i18n.getTranslatedString('UsedGPUID'))
-        self.labelLossyModeQuality.setText(i18n.getTranslatedString('LossyModeQuality'))
-        self.labelCustomCommand.setText(i18n.getTranslatedString('CustomCommand'))
-        self.checkUseWebP.setText(i18n.getTranslatedString('PreferWebP'))
-        self.checkUseTTA.setText(i18n.getTranslatedString('EnableTTA'))
-        self.checkOptimizeGIF.setText(i18n.getTranslatedString('GIFOptimizeTransparency'))
-        self.checkLossyMode.setText(i18n.getTranslatedString('EnableLossyMode'))
-        self.checkIgnoreError.setText(i18n.getTranslatedString('EnableIgnoreError'))
-        self.checkPreupscale.setText(i18n.getTranslatedString('EnablePreupscale'))
-        self.buttonViewREGUISource.setText(i18n.getTranslatedString('ViewREGUISource'))
-        self.buttonViewRESource.setText(i18n.getTranslatedString('ViewRESource'))
-        self.buttonViewAdditionalModel.setText(i18n.getTranslatedString('ViewAdditionalModel'))
-        self.buttonViewDonatePage.setText(i18n.getTranslatedString('ViewDonatePage'))
-
     def updateProcessButton(self):
-        self.buttonProcess.setText(i18n.getTranslatedString(('ContinueProcessing' if self.processingPaused else 'PauseProcessing') if self.processing else 'StartProcessing'))
+        self.buttonProcess.setText(('继续' if self.processingPaused else '暂停') if self.processing else '开始')
         self.setButtonAccent(self.buttonProcess, not (self.processing and not self.processingPaused))
         self.buttonStop.setEnabled(self.processing and not self.cancelEvent.is_set())
 
@@ -490,7 +410,7 @@ class REGUIApp(QMainWindow):
         # 暂停状态点停止 = 立即停止：先放行，让工作线程走到取消检查
         self.pauseEvent.set()
         self.processingPaused = False
-        self.writeToOutput(i18n.getTranslatedString('StoppingProcessing') + '\n')
+        self.writeToOutput('正在停止…\n')
         self.updateProcessButton()
 
     @staticmethod
@@ -498,10 +418,6 @@ class REGUIApp(QMainWindow):
         button.setProperty('accent', 'true' if accent else 'false')
         button.style().unpolish(button)
         button.style().polish(button)
-
-    def change_app_lang(self, index: int):
-        i18n.set_current_language(i18n.locales_map[self.comboLanguage.currentText()])
-        self.retranslateUi()
 
     def applyTheme(self, theme: str):
         import qdarktheme
@@ -551,7 +467,6 @@ class REGUIApp(QMainWindow):
             'IgnoreError': self.checkIgnoreError.isChecked(),
             'Preupscale': self.checkPreupscale.isChecked(),
             'CustomCommand': self.entryCustomCommand.text(),
-            'AppLanguage': i18n.current_language
         }
         with open(define.APP_CONFIG_PATH, 'w', encoding='utf-8') as f:
             self.config.write(f)
@@ -603,11 +518,11 @@ class REGUIApp(QMainWindow):
             inputPaths = tuple(p.strip() for p in self.entryInputPath.text().split('|'))
             outputPaths = tuple(p.strip() for p in self.entryOutputPath.text().split('|'))
             if not inputPaths or not outputPaths or len(inputPaths) != len(outputPaths):
-                return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningInvalidPath'))
+                return QMessageBox.warning(self, define.APP_TITLE, '请输入有效的输入和输出路径。')
 
             initialConfigParams = self.getConfigParams()
             if initialConfigParams.resizeMode == param.ResizeMode.RATIO and initialConfigParams.resizeModeValue == 1:
-                return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningResizeRatio'))
+                return QMessageBox.warning(self, define.APP_TITLE, '放大倍率必须为不小于 2 的整数。')
 
             self.progressValue[0] = 0
             self.progressValue[1] = 0
@@ -615,13 +530,11 @@ class REGUIApp(QMainWindow):
             queue = collections.deque()
             # 重建文件列表：每个输入文件一行，行号即任务的 itemId
             self.treeFiles.clear()
-            self.currentItemId = None
-            self.progressbarCurrentFile.setValue(0)
             for inputPath, outputPath in zip(inputPaths, outputPaths):
                 inputPath = os.path.normpath(inputPath)
                 outputPath = os.path.normpath(outputPath)
                 if not os.path.exists(inputPath):
-                    return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundPath'))
+                    return QMessageBox.warning(self, define.APP_TITLE, '输入的文件或目录不存在。')
 
                 if os.path.isdir(inputPath):
                     for curDir, dirs, files in os.walk(inputPath):
@@ -648,7 +561,7 @@ class REGUIApp(QMainWindow):
                                 queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                             self.progressValue[2] += 1
                     if not queue:
-                        return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningEmptyFolder'))
+                        return QMessageBox.warning(self, define.APP_TITLE, '文件夹内没有可以处理的图片文件。')
                 elif os.path.splitext(inputPath)[1].lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
                     self.progressValue[2] += 1
                     itemId = self.addFileItem(inputPath)
@@ -665,13 +578,7 @@ class REGUIApp(QMainWindow):
                     else:
                         queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                 else:
-                    return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningInvalidFormat'))
-
-            self.setProgress(0)
-            self.progressAnimation[0] = 0
-            self.progressAnimation[1] = 0
-            self.progressAnimation[2] = 0
-            self.progressAnimTimer.stop()
+                    return QMessageBox.warning(self, define.APP_TITLE, '仅支持 JPEG、PNG、GIF 和 WebP 格式的图片文件。')
 
             self.processing = True
             self.processingPaused = False
@@ -685,10 +592,6 @@ class REGUIApp(QMainWindow):
                     default_notification_application_name=define.APP_TITLE,
                     default_notification_icon=os.path.join(define.BASE_PATH, 'icon-128px.png'),
                 )
-            if sys.platform == 'win32':
-                self.progressNativeTaskbar.SetProgressState(int(self.winId()), 2) # TBPF_NORMAL
-                # 初始进度应该是0，但是直接设为0没有效果，所以改成使用非常接近0的值
-                self.progressNativeTaskbar.SetProgressValue(int(self.winId()), 1, 0xFFFFFFFF)
             ts = time.perf_counter()
             def completeCallback(withError: bool):
                 self.sigComplete.emit(withError)
@@ -721,18 +624,16 @@ class REGUIApp(QMainWindow):
     def onTaskComplete(self, withError: bool):
         te = time.perf_counter()
         if sys.platform != 'darwin':
-            self.notification.title = i18n.getTranslatedString('ToastCompletedTitle')
+            self.notification.title = '处理完成'
             if withError:
-                self.notification.message = i18n.getTranslatedString('ToastCompletedMessageWithError').format(self.logPath)
+                self.notification.message = '……但是出现了错误。\n请检查输出或日志文件：{0}'.format(self.logPath)
             else:
-                self.notification.message = i18n.getTranslatedString('ToastCompletedMessage').format(self.notificationOutputPath, te - self.notificationTimeStart)
+                self.notification.message = '输出的文件已保存到：{0}\n耗时：{1:.03f}s'.format(self.notificationOutputPath, te - self.notificationTimeStart)
             self.notification.send(False)
-        self.progressAnimTimer.stop()
-        self.setProgress(100)
 
     def onTaskFail(self, message: str):
         if sys.platform != 'darwin':
-            self.notification.title = i18n.getTranslatedString('ToastFailedTitle')
+            self.notification.title = '处理失败'
             self.notification.message = message
             self.notification.send(False)
 
@@ -753,23 +654,11 @@ class REGUIApp(QMainWindow):
                 elif state == 'waiting':
                     self.setItemState(item, 'skipped')
         self.logFile.close()
-        if sys.platform == 'win32':
-            self.progressNativeTaskbar.SetProgressState(int(self.winId()), 0) # TBPF_NOPROGRESS
 
     def setInputPath(self, paths: tuple[str, ...]):
         self.entryInputPath.setText(' | '.join(paths))
         self.entryOutputPath.setText(self.getOutputPath(paths))
         self.outputPathChanged = False
-
-    def setProgress(self, value: float):
-        self.progressCurrent = value
-        self.progressbar.setValue(round(value * 10))
-
-    def progressAnimStep(self):
-        self.setProgress(self.progressAnimation[0] + (self.progressAnimation[1] - self.progressAnimation[0]) * (lambda x: 1 - (1 - x) ** 3)(self.progressAnimation[2]))
-        self.progressAnimation[2] += 1 / 10
-        if self.progressAnimation[2] >= 1:
-            self.progressAnimTimer.stop()
 
     def writeToOutput(self, s: str):
         if self.logFile:
@@ -781,20 +670,6 @@ class REGUIApp(QMainWindow):
             vsb = self.textOutput.verticalScrollBar()
             if vsb.maximum() == 0 or vsb.pageStep() > vsb.maximum() * .5 or vsb.value() > vsb.maximum() * .9:
                 vsb.setValue(vsb.maximum())
-        self.updateTotalProgress()
-
-    def updateTotalProgress(self):
-        progressFrom = self.progressCurrent
-        progressTo = (self.progressValue[0] + self.progressValue[1]) / self.progressValue[2] * 100
-        if progressFrom != progressTo:
-            self.progressAnimTimer.stop()
-            self.progressAnimation[0] = progressFrom
-            self.progressAnimation[1] = progressTo
-            self.progressAnimation[2] = 0
-            self.progressAnimTimer.start()
-            if sys.platform == 'win32':
-                self.progressNativeTaskbar.SetProgressState(int(self.winId()), 2) # TBPF_NORMAL
-                self.progressNativeTaskbar.SetProgressValue(int(self.winId()), round(progressTo), 100)
 
     def addFileItem(self, path: str) -> int:
         """在文件列表中新增一行，返回行号（即任务的 itemId）。"""
@@ -809,7 +684,7 @@ class REGUIApp(QMainWindow):
 
     def setItemState(self, item: QTreeWidgetItem, state: str):
         item.setData(1, Qt.ItemDataRole.UserRole, state)
-        item.setText(1, i18n.getTranslatedString(ITEM_STATE_LABEL_KEYS[state]))
+        item.setText(1, ITEM_STATE_LABELS[state])
         bar = self.treeFiles.itemWidget(item, 2)
         if bar is not None:
             # 失败/停止的行内进度条通过 QSS 属性着色
@@ -822,9 +697,6 @@ class REGUIApp(QMainWindow):
         if item is None:
             return
         self.setItemState(item, state)
-        if state == 'processing' and self.currentItemId != itemId:
-            self.currentItemId = itemId
-            self.progressbarCurrentFile.setValue(0)
 
     def onItemProgress(self, itemId: int, fraction: float):
         item = self.treeFiles.topLevelItem(itemId)
@@ -833,10 +705,6 @@ class REGUIApp(QMainWindow):
         bar = self.treeFiles.itemWidget(item, 2)
         if bar is not None:
             bar.setValue(round(fraction * 100))
-        # 当前文件进度条与列表行进度同源
-        if itemId == self.currentItemId:
-            self.progressbarCurrentFile.setValue(round(fraction * 1000))
-        self.updateTotalProgress()
         if fraction >= 1:
             self.setItemState(item, 'done')
 
@@ -902,10 +770,8 @@ class REGUIApp(QMainWindow):
             r.append(f'{base} ({self.comboModel.currentText()} {suffix}){ext}')
         return ' | '.join(r)
 
-# Config and model paths are initialized before main frame
-# Because for the WarningNotFoundRE warning message app language
-# must be initialized and for that config must be initialized
-# and for that models variable needs to be set
+# 配置与模型路径在主窗口创建前初始化：
+# 启动时若缺少主程序或模型需要弹出警告，因此必须先完成配置与模型扫描
 def init_config_and_model_paths() -> tuple[configparser.ConfigParser, list[str]]:
     config = configparser.ConfigParser({
         'Upscaler': '',
@@ -928,7 +794,6 @@ def init_config_and_model_paths() -> tuple[configparser.ConfigParser, list[str]]
         'IgnoreError': False,
         'Preupscale': False,
         'CustomCommand': '',
-        'AppLanguage': locale.getdefaultlocale()[0],
     })
     config['Config'] = {}
     config.read(define.APP_CONFIG_PATH)
@@ -967,7 +832,6 @@ def init_config_and_model_paths() -> tuple[configparser.ConfigParser, list[str]]
         # we will be showing a warning message and terminate app
         models = []
 
-    i18n.set_current_language(config['Config'].get('AppLanguage'))
     return config, models
 
 if __name__ == '__main__':
@@ -978,7 +842,7 @@ if __name__ == '__main__':
     config, models = init_config_and_model_paths()
 
     if not os.path.exists(define.RE_PATH) or not models:
-        QMessageBox.warning(None, define.APP_TITLE, i18n.getTranslatedString('WarningNotFoundRE'))
+        QMessageBox.warning(None, define.APP_TITLE, '未找到 Real-ESRGAN-ncnn-vulkan 主程序。\n请前往 https://github.com/xinntao/Real-ESRGAN/releases 下载，并将本文件和主程序放在同一目录下。')
         webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN/releases')
         sys.exit(0)
 
