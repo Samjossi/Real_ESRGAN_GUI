@@ -27,8 +27,8 @@ a = Analysis(
     # 需要打包的数据文件
     datas=[
         ('models', 'models'),
-        ('icon.icns', '.'),
-        ('icon-128px.png', '.'),
+        ('asset/icons/icon.icns', '.'),
+        ('asset/icons/icon-128px.png', '.'),
         # 「关于」页「模型选择指南」按钮展示的说明文档
         ('模型对比说明.md', '.'),
         # qdarktheme 的 QSS/图标等资源
@@ -88,7 +88,7 @@ if os.environ.get('REGUI_ONEFILE'):
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
-        icon='icon.icns',
+        icon='asset/icons/icon.icns',
     )
 else:
     exe = EXE(
@@ -104,7 +104,7 @@ else:
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
-        icon='icon.icns',
+        icon='asset/icons/icon.icns',
     )
 
     # 收集所有文件打包
@@ -122,7 +122,7 @@ else:
     app = BUNDLE(
     coll,
     name='Real-ESRGAN GUI.app',
-    icon='icon.icns',
+    icon='asset/icons/icon.icns',
     bundle_identifier=None,
     info_plist={
             'CFBundleDisplayName': 'Real-ESRGAN GUI',

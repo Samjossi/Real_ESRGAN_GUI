@@ -143,7 +143,7 @@ pip install pyinstaller
 
 # Build macOS app
 echo "INFO: 🚧 Packaging macOS app..."
-sudo pyinstaller realesrgan-gui-macos.spec
+sudo pyinstaller asset/packaging/realesrgan-gui-macos.spec
 
 # Copy built app to Download directory
 ditto dist/Real-ESRGAN\ GUI.app $HOME/Downloads/Real-ESRGAN\ GUI.app

@@ -5,8 +5,8 @@ from PyInstaller.utils.hooks import collect_data_files
 a = Analysis(
     ['main.py'],
     datas=[
-        ('icon-256px.ico', '.'),
-        ('icon-128px.png', '.'),
+        ('asset/icons/icon-256px.ico', '.'),
+        ('asset/icons/icon-128px.png', '.'),
         # 「关于」页「模型选择指南」按钮展示的说明文档
         ('模型对比说明.md', '.'),
         # macOS下通过app实现通知，打包时需要附带
@@ -64,7 +64,7 @@ if os.environ.get('REGUI_ONEFILE'):
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
-        icon='icon-256px.ico',
+        icon='asset/icons/icon-256px.ico',
     )
 else:
     exe = EXE(
@@ -80,7 +80,7 @@ else:
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
-        icon='icon-256px.ico',
+        icon='asset/icons/icon-256px.ico',
     )
     coll = COLLECT(
         exe,

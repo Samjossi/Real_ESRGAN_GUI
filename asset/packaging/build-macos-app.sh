@@ -1,3 +1,6 @@
+# 脚本位于 asset/packaging/，统一切回项目根目录执行
+cd "$(dirname "$0")/../.."
+
 # Download required files
 curl -L "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip" -o realesrgan-ncnn-vulkan-20220424-macos.zip
 unzip -o realesrgan-ncnn-vulkan-20220424-macos.zip
@@ -28,4 +31,4 @@ pip3 install -r requirements.txt
 pip3 install pyinstaller==5.*
 
 # Build macOS app
-sudo pyinstaller realesrgan-gui-macos.spec
+sudo pyinstaller asset/packaging/realesrgan-gui-macos.spec
