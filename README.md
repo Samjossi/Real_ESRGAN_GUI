@@ -86,9 +86,7 @@ curl -L https://raw.githubusercontent.com/TransparentLC/realesrgan-gui/master/ma
     * 将图片文件或目录拖拽到窗口的任意位置上，即可自动将它的路径设定为输入和输出路径。
     * 根据拖拽时选择的放大尺寸计算方式，在输出路径中会自动添加形如 x4、w1280、h1080 的后缀。
 * 深色模式界面
-    * 使用 [darkdetect](https://github.com/albertosottile/darkdetect) 实现。
-    * 在启动时根据系统设定选择使用浅色或深色模式界面，支持在修改系统设定时自动切换。
-    * 在 macOS 上不适用（？）
+    * 默认使用浅色模式，可在「高级设定」中勾选「深色模式」手动切换，立即生效并在重启后保持。
 
 ## 效果对比
 
@@ -224,8 +222,7 @@ Real-ESRGAN 的 GUI 当然不止一个，这里列出了其中的一部分，并
 * [Pillow](https://github.com/python-pillow/Pillow)
 * [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) 原版工具
 * [PySide6](https://doc.qt.io/qtforpython-6/) Qt 的 Python 绑定，提供跨平台的图形界面
-* [pyqtdarktheme](https://github.com/5yutan5/PyQtDarkTheme) Qt 的深色/浅色主题，可跟随系统自动切换
-* [darkdetect](https://github.com/albertosottile/darkdetect) 检测是否正在使用深色模式
+* [pyqtdarktheme](https://github.com/5yutan5/PyQtDarkTheme) Qt 的深色/浅色主题
 * [pyinstaller](https://github.com/pyinstaller/pyinstaller)
 
 ## 致谢

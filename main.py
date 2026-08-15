@@ -384,6 +384,8 @@ class REGUIApp(QMainWindow):
         self.checkLossyMode.setChecked(c.getboolean('LossyMode'))
         self.checkIgnoreError.setChecked(c.getboolean('IgnoreError'))
         self.checkPreupscale.setChecked(c.getboolean('Preupscale'))
+        # 主题：缺失或非法值时默认浅色
+        self.checkDarkMode.setChecked(c.get('Theme', fallback='Light') == 'Dark')
         self.entryCustomCommand.setText(c.get('CustomCommand'))
 
         self.updateProcessButton()
@@ -397,6 +399,10 @@ class REGUIApp(QMainWindow):
         self.spinResizeLongestSide.valueChanged.connect(self.outputPathTraceCallback)
         self.spinResizeShortestSide.valueChanged.connect(self.outputPathTraceCallback)
         self.comboModel.currentTextChanged.connect(self.outputPathTraceCallback)
+        # 初始值恢复完成后再连，避免 setChecked 时多触发一次 applyTheme
+        self.checkDarkMode.toggled.connect(
+            lambda checked: self.applyTheme('Dark' if checked else 'Light')
+        )
 
         # 子控件默认会接受文本拖拽，关闭后拖拽事件才会冒泡到主窗口统一处理
         for w in (self.entryInputPath, self.entryOutputPath, self.entryCustomCommand, self.textOutput):
@@ -495,6 +501,7 @@ class REGUIApp(QMainWindow):
             'LossyMode': self.checkLossyMode.isChecked(),
             'IgnoreError': self.checkIgnoreError.isChecked(),
             'Preupscale': self.checkPreupscale.isChecked(),
+            'Theme': 'Dark' if self.checkDarkMode.isChecked() else 'Light',
             'CustomCommand': self.entryCustomCommand.text(),
         }
         with open(define.APP_CONFIG_PATH, 'w', encoding='utf-8') as f:
@@ -879,16 +886,9 @@ if __name__ == '__main__':
     app.setWindowTitle(define.APP_TITLE)
     app.setWindowIcon(QIcon(os.path.join(define.BASE_PATH, 'asset', 'icons', 'icon-256px.ico')))
 
-    try:
-        import darkdetect
-        app.applyTheme(darkdetect.theme())
-        if sys.platform in {'win32', 'linux'}:
-            t = threading.Thread(target=darkdetect.listener, args=(app.sigTheme.emit,))
-            t.daemon = True
-            t.start()
-    except Exception:
-        print(traceback.format_exc())
-        app.applyTheme('Light')
+    # 主题不再跟随系统：读取配置，缺失或非法值默认浅色
+    theme = config['Config'].get('Theme', fallback='Light')
+    app.applyTheme('Dark' if theme == 'Dark' else 'Light')
 
     initialSize = (720, 640)
     app.setMinimumSize(*initialSize)
