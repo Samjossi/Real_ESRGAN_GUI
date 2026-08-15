@@ -12,8 +12,8 @@ bin = []
 
 if os.path.exists('upscayl-bin'):
     bin.append(('upscayl-bin', '.'))
-elif os.path.exists('realesrgan-ncnn-vulkan'):
-    bin.append(('realesrgan-ncnn-vulkan', '.'))
+elif os.path.exists('bin/realesrgan-ncnn-vulkan'):
+    bin.append(('bin/realesrgan-ncnn-vulkan', '.'))
 
 if os.path.exists('realcugan-ncnn-vulkan'):
     bin.append(('realcugan-ncnn-vulkan', '.'))
@@ -21,7 +21,7 @@ if os.path.exists('realcugan-ncnn-vulkan'):
 # PyInstaller分析脚本
 # 指定主入口文件
 a = Analysis(
-    ['main.py'],
+    ['core/main.py'],
     # 需要打包的二进制
     binaries=bin,
     # 需要打包的数据文件

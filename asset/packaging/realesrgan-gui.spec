@@ -3,7 +3,7 @@ import sys
 from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
-    ['main.py'],
+    ['core/main.py'],
     datas=[
         ('asset/icons/icon-256px.ico', '.'),
         ('asset/icons/icon-128px.png', '.'),

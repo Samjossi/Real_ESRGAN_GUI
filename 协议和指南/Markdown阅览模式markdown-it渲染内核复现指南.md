@@ -33,7 +33,7 @@
 - 技术栈：Python 3.10+ / PySide6（PyQt6 亦可，API 同名）。
 - 你的阅览控件是 `QTextBrowser`（或 `QTextEdit` 只读）子类，当前用
   `setMarkdown()` 或类似方式渲染。
-- 项目根目录在 `sys.path` 中（即 `python main.py` 启动时项目根可 import）。
+- 启动入口所在目录在 `sys.path` 中（即 `python core/main.py` 启动时 `core/` 可 import）。
 - 能跑离屏测试（`QT_QPA_PLATFORM=offscreen`）做冒烟验证。
 
 ---

@@ -42,7 +42,7 @@
 
 * Release 中的 `realesrgan-gui-windows.7z` 和 `realesrgan-gui-ubuntu.tar.xz` 不包含 Real-ESRGAN-ncnn-vulkan 的主程序和官方模型，请自行在[这里](https://github.com/xinntao/Real-ESRGAN/releases)下载后解压到 GUI 的主程序所在的目录。
 * Actions 中上传的是根据最新提交的代码打包的版本（相当于 Nightly），同样不包含 Real-ESRGAN-ncnn-vulkan 的主程序和官方模型。
-* 如果需要从源代码运行，请使用 Python 3.10 或以上版本，执行 `pip install -r requirements.txt` 安装依赖，将 Real-ESRGAN-ncnn-vulkan 解压到项目目录，然后执行 `main.py`。
+* 如果需要从源代码运行，请使用 Python 3.10 或以上版本，执行 `pip install -r requirements.txt` 安装依赖，将 Real-ESRGAN-ncnn-vulkan 解压到项目 `bin/` 目录，然后执行 `core/main.py`。
 * 在其它的 Linux 发行版中可能也可以运行本项目，不过我没有进行测试。
 
 </details>

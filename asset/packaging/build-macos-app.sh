@@ -22,6 +22,10 @@ elif [[ $cpu == *"Apple"* ]]; then
   chmod u+x realesrgan-ncnn-vulkan
 fi
 
+# 引擎二进制收纳至 bin/
+mkdir -p bin
+mv realesrgan-ncnn-vulkan bin/
+
 # Create and activate Python virtualenv
 python3 -m venv 'venv'
 source 'venv/bin/activate'
