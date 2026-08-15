@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QButtonGroup
 from PySide6.QtWidgets import QCheckBox
 from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QDialog
 from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QGridLayout
 from PySide6.QtWidgets import QHBoxLayout
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QRadioButton
 from PySide6.QtWidgets import QSpinBox
 from PySide6.QtWidgets import QTabWidget
+from PySide6.QtWidgets import QTextBrowser
 from PySide6.QtWidgets import QTreeWidget
 from PySide6.QtWidgets import QTreeWidgetItem
 from PySide6.QtWidgets import QVBoxLayout
@@ -330,6 +332,9 @@ class REGUIApp(QMainWindow):
         self.buttonViewDonatePage = QPushButton('捐赠支持开发者', self.frameAbout)
         self.buttonViewDonatePage.clicked.connect(lambda: webbrowser.open_new_tab('https://i.akarin.dev/donate/'))
         aboutButtonGrid.addWidget(self.buttonViewDonatePage, 1, 1)
+        self.buttonModelGuide = QPushButton('模型选择指南', self.frameAbout)
+        self.buttonModelGuide.clicked.connect(self.buttonModelGuide_click)
+        aboutButtonGrid.addWidget(self.buttonModelGuide, 2, 0, 1, 2)
         aboutButtonRow = QHBoxLayout()
         aboutButtonRow.addStretch(1)
         aboutButtonRow.addLayout(aboutButtonGrid)
@@ -412,6 +417,30 @@ class REGUIApp(QMainWindow):
         self.processingPaused = False
         self.writeToOutput('正在停止…\n')
         self.updateProcessButton()
+
+    def buttonModelGuide_click(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('模型选择指南')
+        dialogLayout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        try:
+            with open(os.path.join(define.BASE_PATH, '模型对比说明.md'), encoding='utf-8') as f:
+                browser.setMarkdown(f.read())
+        except OSError:
+            browser.setPlainText(
+                '未找到模型对比说明文件（模型对比说明.md）。\n'
+                '如果是打包版本，可能是打包时遗漏了该文件，请重新下载完整版本。'
+            )
+        dialogLayout.addWidget(browser, 1)
+        buttonClose = QPushButton('关闭', dialog)
+        buttonClose.clicked.connect(dialog.accept)
+        closeRow = QHBoxLayout()
+        closeRow.addStretch(1)
+        closeRow.addWidget(buttonClose)
+        dialogLayout.addLayout(closeRow)
+        dialog.resize(int(self.width() * 0.8), int(self.height() * 0.8))
+        dialog.exec()
 
     @staticmethod
     def setButtonAccent(button: QPushButton, accent: bool):

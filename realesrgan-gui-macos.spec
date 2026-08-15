@@ -29,6 +29,8 @@ a = Analysis(
         ('models', 'models'),
         ('icon.icns', '.'),
         ('icon-128px.png', '.'),
+        # 「关于」页「模型选择指南」按钮展示的说明文档
+        ('模型对比说明.md', '.'),
         # qdarktheme 的 QSS/图标等资源
         *collect_data_files('qdarktheme'),
     ],
