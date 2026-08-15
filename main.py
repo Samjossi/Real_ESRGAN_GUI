@@ -94,7 +94,6 @@ class REGUIApp(QMainWindow):
     sigComplete = Signal(bool)
     sigFail = Signal(str)
     sigFinally = Signal()
-    sigTheme = Signal(str)
     # 文件列表行状态/进度（itemId, state）与（itemId, 0~1 的进度）
     sigItemState = Signal(int, str)
     sigItemProgress = Signal(int, float)
@@ -145,7 +144,6 @@ class REGUIApp(QMainWindow):
         self.sigComplete.connect(self.onTaskComplete, Qt.ConnectionType.QueuedConnection)
         self.sigFail.connect(self.onTaskFail, Qt.ConnectionType.QueuedConnection)
         self.sigFinally.connect(self.onTaskFinally, Qt.ConnectionType.QueuedConnection)
-        self.sigTheme.connect(self.applyTheme, Qt.ConnectionType.QueuedConnection)
         self.sigItemState.connect(self.onItemState, Qt.ConnectionType.QueuedConnection)
         self.sigItemProgress.connect(self.onItemProgress, Qt.ConnectionType.QueuedConnection)
 
@@ -287,6 +285,8 @@ class REGUIApp(QMainWindow):
         advancedLayout.addLayout(leftColumn, 1)
 
         rightColumnAdv = QVBoxLayout()
+        self.checkDarkMode = QCheckBox('深色模式（立即生效，重启后保持）', self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.checkDarkMode)
         self.checkUseWebP = QCheckBox('优先保存为无损 WebP', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkUseWebP)
         self.checkUseTTA = QCheckBox('使用 TTA 模式（速度大幅下降，稍微提高质量）', self.frameAdvancedConfig)
@@ -307,7 +307,7 @@ class REGUIApp(QMainWindow):
         aboutLayout = QVBoxLayout(self.frameAbout)
         aboutLayout.addStretch(1)
         labelIcon = QLabel(self.frameAbout)
-        labelIcon.setPixmap(QPixmap(os.path.join(define.BASE_PATH, 'icon-128px.png')))
+        labelIcon.setPixmap(QPixmap(os.path.join(define.BASE_PATH, 'asset', 'icons', 'icon-128px.png')))
         labelIcon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         aboutLayout.addWidget(labelIcon)
         labelTitle = QLabel(define.APP_TITLE, self.frameAbout)
@@ -619,7 +619,7 @@ class REGUIApp(QMainWindow):
             if sys.platform != 'darwin':
                 self.notification = notifypy.Notify(
                     default_notification_application_name=define.APP_TITLE,
-                    default_notification_icon=os.path.join(define.BASE_PATH, 'icon-128px.png'),
+                    default_notification_icon=os.path.join(define.BASE_PATH, 'asset', 'icons', 'icon-128px.png'),
                 )
             ts = time.perf_counter()
             def completeCallback(withError: bool):
@@ -877,7 +877,7 @@ if __name__ == '__main__':
 
     app = REGUIApp(config, models)
     app.setWindowTitle(define.APP_TITLE)
-    app.setWindowIcon(QIcon(os.path.join(define.BASE_PATH, 'icon-256px.ico')))
+    app.setWindowIcon(QIcon(os.path.join(define.BASE_PATH, 'asset', 'icons', 'icon-256px.ico')))
 
     try:
         import darkdetect

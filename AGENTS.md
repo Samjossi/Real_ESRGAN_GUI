@@ -6,3 +6,9 @@ AGENTS
 - 有时候使用绝对路径的时候就会被系统认为是目录外的文件而被要求权限，这个时候就尝试一下相对路径
 - Always think and respond in Chinese (中文). 所有思考过程和输出必须使用中文。
 - commit message 使用中文
+
+目录说明：
+
+- `asset/icons/`：图标资源（png/ico/icns/psd），`main.py` 与打包配置均从此处引用
+- `asset/packaging/`：打包构建配置（`Info.plist`、两个 build 脚本、两个 `.spec`）
+- 打包时从项目根目录执行，并显式传入 `.spec` 完整路径，例如 `pyinstaller asset/packaging/realesrgan-gui.spec`
