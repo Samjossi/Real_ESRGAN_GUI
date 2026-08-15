@@ -18,11 +18,38 @@ from PIL import ImageSequence
 import define
 import param
 
+class TaskCancelled(Exception):
+    """用户主动停止处理时抛出，不作为失败处理。"""
+    pass
+
 class AbstractTask:
-    def __init__(self, outputCallback: typing.Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        outputCallback: typing.Callable[[str], None],
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
+    ) -> None:
         self.outputCallback = outputCallback
+        # 任务在 GUI 文件列表中对应的行号（None 表示不关联列表行）
+        self.itemId = itemId
+        # 进度上报回调 progressCallback(itemId, fraction)，fraction 为 0~1
+        self.progressCallback = progressCallback
+        # 置位表示用户要求停止处理
+        self.cancelEvent = cancelEvent
+
+    def reportProgress(self, fraction: float) -> None:
+        if self.progressCallback is not None:
+            self.progressCallback(self.itemId, fraction)
+
+    def isCancelRequested(self) -> bool:
+        return self.cancelEvent is not None and self.cancelEvent.is_set()
 
     def run(self) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        """停止处理时清理任务关联的临时文件（尽力而为，失败不阻断收尾）。"""
         pass
 
 class RESpawnTask(AbstractTask):
@@ -33,13 +60,21 @@ class RESpawnTask(AbstractTask):
         inputPath: str, outputPath: str,
         config: param.REConfigParams,
         removeInput: bool = False,
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
     ) -> None:
-        super().__init__(outputCallback)
+        super().__init__(outputCallback, itemId, progressCallback, cancelEvent)
         self.progressValue = progressValue
         self.inputPath = inputPath
         self.outputPath = outputPath
         self.config = config
         self.removeInput = removeInput
+        self.process: subprocess.Popen = None
+
+    def cleanup(self) -> None:
+        if self.removeInput and os.path.exists(self.inputPath):
+            os.remove(self.inputPath)
 
     def run(self) -> None:
         self.outputCallback(f'Using executable: {define.RE_PATH}\n')
@@ -104,68 +139,89 @@ class RESpawnTask(AbstractTask):
         # input -> temp0 -> temp1 -> output
         outputExt = os.path.splitext(self.outputPath)[1]
         files = (inputPathPreupscaled or self.inputPath, *(tempfile.mktemp(outputExt) for _ in range(scalePass)))
-        for i in range(len(files) - 1):
-            inputPath, outputPath = files[i:(i + 2)]
-            alphaOverridePath = None
-            if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
-                model, modelFilename = self.config.model.split('#', 1)
-                denoiseLevel = {
-                    'conservative': -1,
-                    'no-denoise': 0,
-                    **{f'denoise{i}x': i for i in range(1, 4)},
-                }[modelFilename.split('-', 1)[1]]
-                cmd = (
-                    define.RE_PATH,
-                    '-v',
-                    '-i', inputPath,
-                    '-o', outputPath,
-                    '-s', str(self.config.modelFactor),
-                    '-t', str(self.config.tileSize),
-                    '-m', os.path.join(self.config.modelDir, model),
-                    '-n', str(denoiseLevel),
-                    '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
-                    '-c', '1', # accurate sync
-                    *(('-x', ) if self.config.useTTA else ()),
-                )
-            else:
-                cmd = (
-                    define.RE_PATH,
-                    '-v',
-                    '-i', inputPath,
-                    '-o', outputPath,
-                    '-s', str(self.config.modelFactor),
-                    *(('-z', str(self.config.modelFactor)) if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else ()),
-                    '-t', str(self.config.tileSize),
-                    '-n', self.config.model,
-                    '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
-                    *(('-x', ) if self.config.useTTA else ()),
-                )
-            with subprocess.Popen(
-                cmd,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                encoding='utf-8' if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else None,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-            ) as p:
-                for line in p.stderr:
-                    # 如果输入文件是有alpha通道的图片，但是输出扩展名又是JPG
-                    # Real-ESRGAN会强行给输出的文件名加上PNG的扩展名，导致后续处理找不到文件
-                    # 这里额外加了一个重命名为原来的输出文件名的操作
-                    # https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/blob/37026f49824c5cf84062e7c6a5dd71445dcf610f/src/main.cpp#L283
-                    if m := re.search(r'^image .+? has alpha channel ! .+? will output (.+?)$', line, re.M):
-                        alphaOverridePath = m.group(1)
-                    elif m := re.search(r'(\d+[.,]\d+)%', line):
-                        self.progressValue[0] = (i + float(m.group(1).replace(',', '.')) / 100) / (len(files) - 1)
-                    elif m := re.search(r'^.+? -> .+? done$', line, re.M):
-                        self.progressValue[0] = (i + 1) / (len(files) - 1)
-                    self.outputCallback(line)
-            if p.returncode:
-                raise subprocess.CalledProcessError(p.returncode, cmd)
-            if i > 0 or inputPath == inputPathPreupscaled or self.removeInput:
-                os.remove(inputPath)
-            if alphaOverridePath:
-                shutil.move(alphaOverridePath, outputPath)
-                self.outputCallback(f'Rename {alphaOverridePath} to {outputPath}\n')
+        try:
+            for i in range(len(files) - 1):
+                inputPath, outputPath = files[i:(i + 2)]
+                alphaOverridePath = None
+                if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
+                    model, modelFilename = self.config.model.split('#', 1)
+                    denoiseLevel = {
+                        'conservative': -1,
+                        'no-denoise': 0,
+                        **{f'denoise{i}x': i for i in range(1, 4)},
+                    }[modelFilename.split('-', 1)[1]]
+                    cmd = (
+                        define.RE_PATH,
+                        '-v',
+                        '-i', inputPath,
+                        '-o', outputPath,
+                        '-s', str(self.config.modelFactor),
+                        '-t', str(self.config.tileSize),
+                        '-m', os.path.join(self.config.modelDir, model),
+                        '-n', str(denoiseLevel),
+                        '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
+                        '-c', '1', # accurate sync
+                        *(('-x', ) if self.config.useTTA else ()),
+                    )
+                else:
+                    cmd = (
+                        define.RE_PATH,
+                        '-v',
+                        '-i', inputPath,
+                        '-o', outputPath,
+                        '-s', str(self.config.modelFactor),
+                        *(('-z', str(self.config.modelFactor)) if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else ()),
+                        '-t', str(self.config.tileSize),
+                        '-n', self.config.model,
+                        '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
+                        *(('-x', ) if self.config.useTTA else ()),
+                    )
+                with subprocess.Popen(
+                    cmd,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    encoding='utf-8' if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else None,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                ) as p:
+                    self.process = p
+                    for line in p.stderr:
+                        if self.isCancelRequested():
+                            p.terminate()
+                            try:
+                                p.wait(5)
+                            except subprocess.TimeoutExpired:
+                                p.kill()
+                            raise TaskCancelled()
+                        # 如果输入文件是有alpha通道的图片，但是输出扩展名又是JPG
+                        # Real-ESRGAN会强行给输出的文件名加上PNG的扩展名，导致后续处理找不到文件
+                        # 这里额外加了一个重命名为原来的输出文件名的操作
+                        # https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/blob/37026f49824c5cf84062e7c6a5dd71445dcf610f/src/main.cpp#L283
+                        if m := re.search(r'^image .+? has alpha channel ! .+? will output (.+?)$', line, re.M):
+                            alphaOverridePath = m.group(1)
+                        elif m := re.search(r'(\d+[.,]\d+)%', line):
+                            self.progressValue[0] = (i + float(m.group(1).replace(',', '.')) / 100) / (len(files) - 1)
+                            self.reportProgress(self.progressValue[0])
+                        elif m := re.search(r'^.+? -> .+? done$', line, re.M):
+                            self.progressValue[0] = (i + 1) / (len(files) - 1)
+                            self.reportProgress(self.progressValue[0])
+                        self.outputCallback(line)
+                self.process = None
+                if p.returncode:
+                    raise subprocess.CalledProcessError(p.returncode, cmd)
+                if i > 0 or inputPath == inputPathPreupscaled or self.removeInput:
+                    os.remove(inputPath)
+                if alphaOverridePath:
+                    shutil.move(alphaOverridePath, outputPath)
+                    self.outputCallback(f'Rename {alphaOverridePath} to {outputPath}\n')
+        except TaskCancelled:
+            # 停止处理时尽力清理半成品输出与临时文件，清理失败只写日志不阻断收尾
+            for f in (*files[1:], inputPathPreupscaled, self.inputPath if self.removeInput else None):
+                if f and os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        self.outputCallback(traceback.format_exc())
+            raise
 
         os.makedirs(os.path.split(self.outputPath)[0], exist_ok=True)
         if srcWidth == dstWidth and srcHeight == dstHeight:
@@ -181,6 +237,7 @@ class RESpawnTask(AbstractTask):
             if scalePass:
                 os.remove(files[-1])
 
+        self.reportProgress(1)
         self.progressValue[0] = 0
         self.progressValue[1] += 1
 
@@ -192,12 +249,20 @@ class MergeGIFTask(AbstractTask):
         frames: tuple[str, ...],
         durations: tuple[int, ...],
         optimizeTransparency: bool,
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
     ) -> None:
-        super().__init__(outputCallback)
+        super().__init__(outputCallback, itemId, progressCallback, cancelEvent)
         self.outputPath = outputPath
         self.frames = frames
         self.durations = durations
         self.optimizeTransparency = optimizeTransparency
+
+    def cleanup(self) -> None:
+        for f in self.frames:
+            if os.path.exists(f):
+                os.remove(f)
 
     def run(self) -> None:
         self.outputCallback(f'Merging {len(self.frames)} frames to {self.outputPath}\n')
@@ -236,6 +301,7 @@ class MergeGIFTask(AbstractTask):
             frameImgs.append(img)
         os.makedirs(os.path.split(self.outputPath)[0], exist_ok=True)
         frameImgs[0].save(self.outputPath, save_all=True, optimize=True, loop=0, duration=self.durations, append_images=frameImgs[1:], disposal=2)
+        self.reportProgress(1)
 
 class SplitGIFTask(AbstractTask):
     def __init__(
@@ -246,8 +312,11 @@ class SplitGIFTask(AbstractTask):
         config: param.REConfigParams,
         queue: collections.deque[AbstractTask],
         optimizeTransparency: bool,
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
     ) -> None:
-        super().__init__(outputCallback)
+        super().__init__(outputCallback, itemId, progressCallback, cancelEvent)
         self.progressValue = progressValue
         self.inputPath = inputPath
         self.outputPath = outputPath
@@ -259,6 +328,8 @@ class SplitGIFTask(AbstractTask):
         frames = []
         durations = []
         tasks = []
+        # 帧级任务的进度按（已完成帧数+当前帧进度）/总帧数聚合到 GIF 整体的 0~1
+        frameCount = [0]
         with Image.open(self.inputPath) as img:
             for f in ImageSequence.Iterator(img):
                 f: Image.Image
@@ -274,17 +345,22 @@ class SplitGIFTask(AbstractTask):
                 else:
                     f.save(frameSrcPath, lossless=True)
                 self.outputCallback(f'Frame #{len(frames)}: {frameSrcPath} -> {frameDstPath} Duration: {d}\n')
+                frameIndex = len(frames)
+                def frameProgress(itemId: int | None, fraction: float, frameIndex: int = frameIndex) -> None:
+                    if self.progressCallback is not None and frameCount[0]:
+                        self.progressCallback(self.itemId, (frameIndex + fraction) / frameCount[0])
                 frames.append(frameDstPath)
                 durations.append(d)
-                tasks.append(RESpawnTask(self.outputCallback, self.progressValue, frameSrcPath, frameDstPath, self.config, True))
+                tasks.append(RESpawnTask(self.outputCallback, self.progressValue, frameSrcPath, frameDstPath, self.config, True, self.itemId, frameProgress, self.cancelEvent))
                 self.progressValue[2] += 1
+        frameCount[0] = len(frames)
         self.progressValue[2] -= 1
         if self.config.customCommand:
             t = tempfile.mktemp('.gif')
-            tasks.append(MergeGIFTask(self.outputCallback, t, frames, durations, self.optimizeTransparency))
-            tasks.append(CustomCompressTask(self.outputCallback, t, self.outputPath, self.config.customCommand, True))
+            tasks.append(MergeGIFTask(self.outputCallback, t, frames, durations, self.optimizeTransparency, cancelEvent=self.cancelEvent))
+            tasks.append(CustomCompressTask(self.outputCallback, t, self.outputPath, self.config.customCommand, True, self.itemId, self.progressCallback, self.cancelEvent))
         else:
-            tasks.append(MergeGIFTask(self.outputCallback, self.outputPath, frames, durations, self.optimizeTransparency))
+            tasks.append(MergeGIFTask(self.outputCallback, self.outputPath, frames, durations, self.optimizeTransparency, self.itemId, self.progressCallback, self.cancelEvent))
         tasks.reverse()
         for t in tasks:
             self.queue.appendleft(t)
@@ -296,12 +372,19 @@ class LossyCompressTask(AbstractTask):
         inputPath: str, outputPath: str,
         quality: int,
         removeInput: bool = False,
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
     ) -> None:
-        super().__init__(outputCallback)
+        super().__init__(outputCallback, itemId, progressCallback, cancelEvent)
         self.inputPath = inputPath
         self.outputPath = outputPath
         self.quality = quality
         self.removeInput = removeInput
+
+    def cleanup(self) -> None:
+        if self.removeInput and os.path.exists(self.inputPath):
+            os.remove(self.inputPath)
 
     def run(self) -> None:
         self.outputCallback(f'Compressing {self.inputPath} to {self.outputPath} with quality {self.quality}\n')
@@ -317,6 +400,7 @@ class LossyCompressTask(AbstractTask):
                     img.save(self.outputPath, quality=self.quality, optimize=True, progressive=True)
         if self.removeInput:
             os.remove(self.inputPath)
+        self.reportProgress(1)
 
 class CustomCompressTask(AbstractTask):
     def __init__(
@@ -325,12 +409,20 @@ class CustomCompressTask(AbstractTask):
         inputPath: str, outputPath: str,
         commandTemplate: str,
         removeInput: bool = False,
+        itemId: int | None = None,
+        progressCallback: typing.Callable[[int | None, float], None] | None = None,
+        cancelEvent: threading.Event | None = None,
     ) -> None:
-        super().__init__(outputCallback)
+        super().__init__(outputCallback, itemId, progressCallback, cancelEvent)
         self.inputPath = inputPath
         self.outputPath = outputPath
         self.commandTemplate = commandTemplate
         self.removeInput = removeInput
+        self.process: subprocess.Popen = None
+
+    def cleanup(self) -> None:
+        if self.removeInput and os.path.exists(self.inputPath):
+            os.remove(self.inputPath)
 
     def run(self) -> None:
         cmd = []
@@ -352,38 +444,70 @@ class CustomCompressTask(AbstractTask):
             encoding='utf-8',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         ) as p:
+            self.process = p
             for line in p.stderr:
+                if self.isCancelRequested():
+                    p.terminate()
+                    try:
+                        p.wait(5)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                    raise TaskCancelled()
                 self.outputCallback(line)
+        self.process = None
         if p.returncode:
             raise subprocess.CalledProcessError(p.returncode, cmd)
         if self.removeInput:
             os.remove(self.inputPath)
+        self.reportProgress(1)
 
 def taskRunner(
     queue: collections.deque[AbstractTask],
     pauseEvent: threading.Event,
+    cancelEvent: threading.Event,
     outputCallback: typing.Callable[[str], None],
     completeCallback: typing.Callable[[bool], None],
-    failCallback: typing.Callable[[Exception], None],
+    failCallback: typing.Callable[[Exception, int | None], None],
     finallyCallback: typing.Callable[[], None],
     ignoreError: bool,
+    taskStartCallback: typing.Callable[[AbstractTask], None] | None = None,
 ) -> None:
     counter = 0
     withError = False
+    cancelled = False
     while queue:
+        pauseEvent.wait()
+        if cancelEvent.is_set():
+            cancelled = True
+            break
+        currentTask = queue.popleft()
         try:
-            pauseEvent.wait()
+            if taskStartCallback is not None:
+                taskStartCallback(currentTask)
             ts = time.perf_counter()
-            queue.popleft().run()
+            currentTask.run()
             te = time.perf_counter()
             outputCallback(f'Task #{counter} completed in {round((te - ts) * 1000)}ms.\n')
             counter += 1
+        except TaskCancelled:
+            cancelled = True
+            break
         except Exception as ex:
             withError = True
             outputCallback(traceback.format_exc())
-            failCallback(ex)
+            failCallback(ex, getattr(currentTask, 'itemId', None))
             if not ignoreError:
                 finallyCallback()
                 return
+    if cancelled:
+        # 用户主动停止：清空队列并尽力清理剩余任务关联的临时文件，不当作失败
+        for t in queue:
+            try:
+                t.cleanup()
+            except Exception:
+                outputCallback(traceback.format_exc())
+        queue.clear()
+        finallyCallback()
+        return
     completeCallback(withError)
     finallyCallback()

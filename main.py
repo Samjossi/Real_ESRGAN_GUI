@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QComboBox
 from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QGridLayout
 from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QHeaderView
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QLineEdit
 from PySide6.QtWidgets import QMainWindow
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QRadioButton
 from PySide6.QtWidgets import QSpinBox
 from PySide6.QtWidgets import QTabWidget
+from PySide6.QtWidgets import QTreeWidget
+from PySide6.QtWidgets import QTreeWidgetItem
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
@@ -66,6 +69,25 @@ QPushButton[accent="true"]:pressed {
     background-color: #006cc0;
 }
 '''
+# 文件列表行内进度条的状态着色（失败红 / 停止灰）
+ITEM_STATE_QSS = '''
+QProgressBar[state="failed"]::chunk {
+    background-color: #d13438;
+}
+QProgressBar[state="stopped"]::chunk {
+    background-color: #8a8886;
+}
+'''
+
+# 文件列表行状态 -> i18n 文案键
+ITEM_STATE_LABEL_KEYS = {
+    'waiting': 'ItemStateWaiting',
+    'processing': 'ItemStateProcessing',
+    'done': 'ItemStateDone',
+    'failed': 'ItemStateFailed',
+    'stopped': 'ItemStateStopped',
+    'skipped': 'ItemStateSkipped',
+}
 
 class REGUIApp(QMainWindow):
     # 工作线程通过信号把日志/回调投递到 GUI 线程，Qt 不允许跨线程直接操作界面
@@ -74,6 +96,9 @@ class REGUIApp(QMainWindow):
     sigFail = Signal(str)
     sigFinally = Signal()
     sigTheme = Signal(str)
+    # 文件列表行状态/进度（itemId, state）与（itemId, 0~1 的进度）
+    sigItemState = Signal(int, str)
+    sigItemProgress = Signal(int, float)
 
     def __init__(self, config: configparser.ConfigParser, models: list[str]):
         super().__init__()
@@ -117,6 +142,8 @@ class REGUIApp(QMainWindow):
         # 处理状态
         self.processing = False
         self.processingPaused = False
+        # 当前正在处理的文件列表行号（驱动“当前文件”进度条）
+        self.currentItemId: int | None = None
         # 任务栏进度条
         if sys.platform == 'win32':
             import comtypes.client
@@ -130,12 +157,16 @@ class REGUIApp(QMainWindow):
             self.progressNativeTaskbar = None
         # 控制是否暂停
         self.pauseEvent = threading.Event()
+        # 控制是否停止（取消）处理
+        self.cancelEvent = threading.Event()
 
         self.sigOutput.connect(self.writeToOutput, Qt.ConnectionType.QueuedConnection)
         self.sigComplete.connect(self.onTaskComplete, Qt.ConnectionType.QueuedConnection)
         self.sigFail.connect(self.onTaskFail, Qt.ConnectionType.QueuedConnection)
         self.sigFinally.connect(self.onTaskFinally, Qt.ConnectionType.QueuedConnection)
         self.sigTheme.connect(self.applyTheme, Qt.ConnectionType.QueuedConnection)
+        self.sigItemState.connect(self.onItemState, Qt.ConnectionType.QueuedConnection)
+        self.sigItemProgress.connect(self.onItemProgress, Qt.ConnectionType.QueuedConnection)
 
         self.setupWidgets()
 
@@ -224,6 +255,10 @@ class REGUIApp(QMainWindow):
         self.comboModel.addItems(self.models)
         rightColumn.addWidget(self.comboModel)
         rightColumn.addStretch(1)
+        self.buttonStop = QPushButton(self.frameBasicConfig)
+        self.buttonStop.setEnabled(False)
+        self.buttonStop.clicked.connect(self.buttonStop_click)
+        rightColumn.addWidget(self.buttonStop, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         self.buttonProcess = QPushButton(self.frameBasicConfig)
         self.buttonProcess.clicked.connect(self.buttonProcess_click)
         rightColumn.addWidget(self.buttonProcess, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
@@ -327,10 +362,25 @@ class REGUIApp(QMainWindow):
         self.notebookConfig.addTab(self.frameAdvancedConfig, '')
         self.notebookConfig.addTab(self.frameAbout, '')
 
+        # ---- 文件列表（逐项显示处理状态与进度） ----
+        self.treeFiles = QTreeWidget(self)
+        self.treeFiles.setColumnCount(3)
+        self.treeFiles.setRootIsDecorated(False)
+        self.treeFiles.setUniformRowHeights(True)
+        self.treeFiles.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.treeFiles.setColumnWidth(1, 80)
+        self.treeFiles.setColumnWidth(2, 160)
+        centralLayout.addWidget(self.treeFiles, 1)
+
         # ---- 日志输出与进度条 ----
         self.textOutput = QPlainTextEdit(self)
         self.textOutput.setReadOnly(True)
         centralLayout.addWidget(self.textOutput, 1)
+
+        # 当前正在处理的这一张图的进度（0~1 对应 0~1000）
+        self.progressbarCurrentFile = QProgressBar(self, minimum=0, maximum=1000)
+        self.progressbarCurrentFile.setValue(0)
+        centralLayout.addWidget(self.progressbarCurrentFile)
 
         self.progressbar = QProgressBar(self, minimum=0, maximum=1000)
         self.progressbar.setValue(0)
@@ -395,6 +445,12 @@ class REGUIApp(QMainWindow):
         self.radioResizeHeight.setText(i18n.getTranslatedString('ResizeModeHeight'))
         self.radioResizeLongestSide.setText(i18n.getTranslatedString('ResizeModeLongestSide'))
         self.radioResizeShortestSide.setText(i18n.getTranslatedString('ResizeModeShortestSide'))
+        self.buttonStop.setText(i18n.getTranslatedString('StopProcessing'))
+        self.treeFiles.setHeaderLabels((
+            i18n.getTranslatedString('ItemColumnFile'),
+            i18n.getTranslatedString('ItemColumnState'),
+            i18n.getTranslatedString('ItemColumnProgress'),
+        ))
         self.updateProcessButton()
         self.labelDownsampleMode.setText(i18n.getTranslatedString('DownsampleMode'))
 
@@ -425,6 +481,17 @@ class REGUIApp(QMainWindow):
     def updateProcessButton(self):
         self.buttonProcess.setText(i18n.getTranslatedString(('ContinueProcessing' if self.processingPaused else 'PauseProcessing') if self.processing else 'StartProcessing'))
         self.setButtonAccent(self.buttonProcess, not (self.processing and not self.processingPaused))
+        self.buttonStop.setEnabled(self.processing and not self.cancelEvent.is_set())
+
+    def buttonStop_click(self):
+        if not self.processing or self.cancelEvent.is_set():
+            return
+        self.cancelEvent.set()
+        # 暂停状态点停止 = 立即停止：先放行，让工作线程走到取消检查
+        self.pauseEvent.set()
+        self.processingPaused = False
+        self.writeToOutput(i18n.getTranslatedString('StoppingProcessing') + '\n')
+        self.updateProcessButton()
 
     @staticmethod
     def setButtonAccent(button: QPushButton, accent: bool):
@@ -438,7 +505,7 @@ class REGUIApp(QMainWindow):
 
     def applyTheme(self, theme: str):
         import qdarktheme
-        qdarktheme.setup_theme(theme.lower() if theme else 'light', additional_qss=ACCENT_QSS)
+        qdarktheme.setup_theme(theme.lower() if theme else 'light', additional_qss=ACCENT_QSS + ITEM_STATE_QSS)
         # https://stackoverflow.com/questions/57124243/winforms-dark-title-bar-on-windows-10
         if sys.platform == 'win32':
             import ctypes
@@ -546,6 +613,10 @@ class REGUIApp(QMainWindow):
             self.progressValue[1] = 0
             self.progressValue[2] = 0
             queue = collections.deque()
+            # 重建文件列表：每个输入文件一行，行号即任务的 itemId
+            self.treeFiles.clear()
+            self.currentItemId = None
+            self.progressbarCurrentFile.setValue(0)
             for inputPath, outputPath in zip(inputPaths, outputPaths):
                 inputPath = os.path.normpath(inputPath)
                 outputPath = os.path.normpath(outputPath)
@@ -559,38 +630,40 @@ class REGUIApp(QMainWindow):
                                 continue
                             f = os.path.join(curDir, f)
                             g = os.path.join(outputPath, f.removeprefix(inputPath + os.path.sep))
+                            itemId = self.addFileItem(f)
                             if os.path.splitext(f)[1].lower() == '.gif':
-                                queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, queue, self.checkOptimizeGIF.isChecked()))
+                                queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, queue, self.checkOptimizeGIF.isChecked(), itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                             elif self.entryCustomCommand.text().strip():
                                 t = tempfile.mktemp('.png')
                                 g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams))
-                                queue.append(task.CustomCompressTask(self.sigOutput.emit, t, g, self.entryCustomCommand.text().strip(), True))
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                                queue.append(task.CustomCompressTask(self.sigOutput.emit, t, g, self.entryCustomCommand.text().strip(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                             elif self.checkLossyMode.isChecked():
                                 t = tempfile.mktemp('.webp')
                                 g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.jpg')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams))
-                                queue.append(task.LossyCompressTask(self.sigOutput.emit, t, g, self.spinLossyQuality.value(), True))
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                                queue.append(task.LossyCompressTask(self.sigOutput.emit, t, g, self.spinLossyQuality.value(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                             else:
                                 g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams))
+                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                             self.progressValue[2] += 1
                     if not queue:
                         return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningEmptyFolder'))
                 elif os.path.splitext(inputPath)[1].lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
                     self.progressValue[2] += 1
+                    itemId = self.addFileItem(inputPath)
                     if os.path.splitext(inputPath)[1].lower() == '.gif':
-                        queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, queue, self.checkOptimizeGIF.isChecked()))
+                        queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, queue, self.checkOptimizeGIF.isChecked(), itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                     elif self.entryCustomCommand.text().strip():
                         t = tempfile.mktemp('.png')
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams))
-                        queue.append(task.CustomCompressTask(self.sigOutput.emit, t, outputPath, self.entryCustomCommand.text().strip(), True))
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                        queue.append(task.CustomCompressTask(self.sigOutput.emit, t, outputPath, self.entryCustomCommand.text().strip(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                     elif self.checkLossyMode.isChecked() and os.path.splitext(outputPath)[1].lower() in {'.jpg', '.jpeg', '.webp'}:
                         t = tempfile.mktemp('.webp')
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams))
-                        queue.append(task.LossyCompressTask(self.sigOutput.emit, t, outputPath, self.spinLossyQuality.value(), True))
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                        queue.append(task.LossyCompressTask(self.sigOutput.emit, t, outputPath, self.spinLossyQuality.value(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                     else:
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams))
+                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                 else:
                     return QMessageBox.warning(self, define.APP_TITLE, i18n.getTranslatedString('WarningInvalidFormat'))
 
@@ -603,6 +676,7 @@ class REGUIApp(QMainWindow):
             self.processing = True
             self.processingPaused = False
             self.pauseEvent.set()
+            self.cancelEvent.clear()
             self.updateProcessButton()
             self.textOutput.clear()
 
@@ -618,8 +692,10 @@ class REGUIApp(QMainWindow):
             ts = time.perf_counter()
             def completeCallback(withError: bool):
                 self.sigComplete.emit(withError)
-            def failCallback(ex: Exception):
+            def failCallback(ex: Exception, itemId: int | None = None):
                 self.sigFail.emit(f'{type(ex).__name__}: {ex}')
+                if itemId is not None:
+                    self.sigItemState.emit(itemId, 'failed')
             self.notificationOutputPath = outputPath
             self.notificationTimeStart = ts
 
@@ -629,11 +705,13 @@ class REGUIApp(QMainWindow):
                 args=(
                     queue,
                     self.pauseEvent,
+                    self.cancelEvent,
                     self.sigOutput.emit,
                     completeCallback,
                     failCallback,
                     self.sigFinally.emit,
                     self.checkIgnoreError.isChecked(),
+                    self.taskStartCallback,
                 )
             )
             t.start()
@@ -659,9 +737,21 @@ class REGUIApp(QMainWindow):
             self.notification.send(False)
 
     def onTaskFinally(self):
+        # 用户主动停止时：处理中的行标记为“已停止”，等待中的行标记为“未处理”
+        wasCancelled = self.cancelEvent.is_set()
         self.processing = False
+        self.processingPaused = False
         self.pauseEvent.set()
+        self.cancelEvent.clear()
         self.updateProcessButton()
+        if wasCancelled:
+            for i in range(self.treeFiles.topLevelItemCount()):
+                item = self.treeFiles.topLevelItem(i)
+                state = item.data(1, Qt.ItemDataRole.UserRole)
+                if state == 'processing':
+                    self.setItemState(item, 'stopped')
+                elif state == 'waiting':
+                    self.setItemState(item, 'skipped')
         self.logFile.close()
         if sys.platform == 'win32':
             self.progressNativeTaskbar.SetProgressState(int(self.winId()), 0) # TBPF_NOPROGRESS
@@ -684,12 +774,16 @@ class REGUIApp(QMainWindow):
     def writeToOutput(self, s: str):
         if self.logFile:
             self.logFile.write(s)
-        self.textOutput.moveCursor(QTextCursor.MoveOperation.End)
-        self.textOutput.insertPlainText(s)
-        vsb = self.textOutput.verticalScrollBar()
-        if vsb.maximum() == 0 or vsb.pageStep() > vsb.maximum() * .5 or vsb.value() > vsb.maximum() * .9:
-            vsb.setValue(vsb.maximum())
+        # 子进程的百分比进度行不进 GUI 文本框（只写日志文件），进度改由进度条显示
+        if not re.fullmatch(r'[\d.,\s%]+', s):
+            self.textOutput.moveCursor(QTextCursor.MoveOperation.End)
+            self.textOutput.insertPlainText(s)
+            vsb = self.textOutput.verticalScrollBar()
+            if vsb.maximum() == 0 or vsb.pageStep() > vsb.maximum() * .5 or vsb.value() > vsb.maximum() * .9:
+                vsb.setValue(vsb.maximum())
+        self.updateTotalProgress()
 
+    def updateTotalProgress(self):
         progressFrom = self.progressCurrent
         progressTo = (self.progressValue[0] + self.progressValue[1]) / self.progressValue[2] * 100
         if progressFrom != progressTo:
@@ -701,6 +795,58 @@ class REGUIApp(QMainWindow):
             if sys.platform == 'win32':
                 self.progressNativeTaskbar.SetProgressState(int(self.winId()), 2) # TBPF_NORMAL
                 self.progressNativeTaskbar.SetProgressValue(int(self.winId()), round(progressTo), 100)
+
+    def addFileItem(self, path: str) -> int:
+        """在文件列表中新增一行，返回行号（即任务的 itemId）。"""
+        itemId = self.treeFiles.topLevelItemCount()
+        item = QTreeWidgetItem((os.path.basename(path), '', ''))
+        self.treeFiles.addTopLevelItem(item)
+        bar = QProgressBar(self.treeFiles, minimum=0, maximum=100)
+        bar.setValue(0)
+        self.treeFiles.setItemWidget(item, 2, bar)
+        self.setItemState(item, 'waiting')
+        return itemId
+
+    def setItemState(self, item: QTreeWidgetItem, state: str):
+        item.setData(1, Qt.ItemDataRole.UserRole, state)
+        item.setText(1, i18n.getTranslatedString(ITEM_STATE_LABEL_KEYS[state]))
+        bar = self.treeFiles.itemWidget(item, 2)
+        if bar is not None:
+            # 失败/停止的行内进度条通过 QSS 属性着色
+            bar.setProperty('state', state)
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+
+    def onItemState(self, itemId: int, state: str):
+        item = self.treeFiles.topLevelItem(itemId)
+        if item is None:
+            return
+        self.setItemState(item, state)
+        if state == 'processing' and self.currentItemId != itemId:
+            self.currentItemId = itemId
+            self.progressbarCurrentFile.setValue(0)
+
+    def onItemProgress(self, itemId: int, fraction: float):
+        item = self.treeFiles.topLevelItem(itemId)
+        if item is None:
+            return
+        bar = self.treeFiles.itemWidget(item, 2)
+        if bar is not None:
+            bar.setValue(round(fraction * 100))
+        # 当前文件进度条与列表行进度同源
+        if itemId == self.currentItemId:
+            self.progressbarCurrentFile.setValue(round(fraction * 1000))
+        self.updateTotalProgress()
+        if fraction >= 1:
+            self.setItemState(item, 'done')
+
+    def taskProgressCallback(self, itemId: int | None, fraction: float):
+        if itemId is not None:
+            self.sigItemProgress.emit(itemId, fraction)
+
+    def taskStartCallback(self, t: 'task.AbstractTask'):
+        if t.itemId is not None:
+            self.sigItemState.emit(t.itemId, 'processing')
 
     def getConfigParams(self) -> param.REConfigParams:
         resizeMode = param.ResizeMode(self.resizeModeGroup.checkedId())
