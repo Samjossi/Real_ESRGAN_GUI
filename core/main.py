@@ -127,7 +127,6 @@ class REGUIApp(QMainWindow):
 
         self.config = config
 
-        self.outputPathChanged = True
         self.logPath = os.path.join(define.APP_PATH, 'output.log')
         self.logFile: typing.IO = None
         # 任务共享进度：当前文件进度（0~1）/已完成文件数/总文件数（由 task.py 写入）
@@ -168,7 +167,7 @@ class REGUIApp(QMainWindow):
         basicLayout = QVBoxLayout(self.frameBasicConfig)
         basicLayout.setContentsMargins(5, 5, 5, 5)
 
-        self.labelInputPath = QLabel('输入（文件或文件夹）', self.frameBasicConfig)
+        self.labelInputPath = QLabel('输入（可多选图片文件）', self.frameBasicConfig)
         basicLayout.addWidget(self.labelInputPath)
         inputRow = QHBoxLayout()
         self.entryInputPath = QLineEdit(self.frameBasicConfig)
@@ -178,12 +177,10 @@ class REGUIApp(QMainWindow):
         inputRow.addWidget(self.buttonInputPath)
         basicLayout.addLayout(inputRow)
 
-        self.labelOutputPath = QLabel('输出', self.frameBasicConfig)
+        self.labelOutputPath = QLabel('输出目录', self.frameBasicConfig)
         basicLayout.addWidget(self.labelOutputPath)
         outputRow = QHBoxLayout()
         self.entryOutputPath = QLineEdit(self.frameBasicConfig)
-        # 手动修改输出路径后，缩放参数变化时不再自动重算
-        self.entryOutputPath.textEdited.connect(lambda: setattr(self, 'outputPathChanged', True))
         outputRow.addWidget(self.entryOutputPath, 1)
         self.buttonOutputPath = QPushButton('浏览', self.frameBasicConfig)
         self.buttonOutputPath.clicked.connect(self.buttonOutputPath_click)
@@ -391,23 +388,14 @@ class REGUIApp(QMainWindow):
         self.updateProcessButton()
         self.comboTileSize.setCurrentIndex(c.getint('TileSizeIndex'))
 
-        # ---- 信号连接（初始值恢复完成后再连，避免误触发输出路径重算）----
-        self.resizeModeGroup.idToggled.connect(self.outputPathTraceCallback)
-        self.spinResizeRatio.valueChanged.connect(self.outputPathTraceCallback)
-        self.spinResizeWidth.valueChanged.connect(self.outputPathTraceCallback)
-        self.spinResizeHeight.valueChanged.connect(self.outputPathTraceCallback)
-        self.spinResizeLongestSide.valueChanged.connect(self.outputPathTraceCallback)
-        self.spinResizeShortestSide.valueChanged.connect(self.outputPathTraceCallback)
-        self.comboModel.currentTextChanged.connect(self.outputPathTraceCallback)
+        # ---- 信号连接 ----
         # 初始值恢复完成后再连，避免 setChecked 时多触发一次 applyTheme
         self.checkDarkMode.toggled.connect(
             lambda checked: self.applyTheme('Dark' if checked else 'Light')
         )
 
-        # 子控件默认会接受文本拖拽，关闭后拖拽事件才会冒泡到主窗口统一处理
-        for w in (self.entryInputPath, self.entryOutputPath, self.entryCustomCommand, self.textOutput):
-            w.setAcceptDrops(False)
-        self.setAcceptDrops(True)
+        # 拖放输入已移除：QMainWindow 默认接受拖放，需显式关闭
+        self.setAcceptDrops(False)
 
     def updateProcessButton(self):
         self.buttonProcess.setText(('继续' if self.processingPaused else '暂停') if self.processing else '开始')
@@ -507,16 +495,6 @@ class REGUIApp(QMainWindow):
         with open(define.APP_CONFIG_PATH, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        paths = tuple(u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile() and u.toLocalFile())
-        if paths:
-            self.setInputPath(paths)
-        event.acceptProposedAction()
-
     def buttonInputPath_click(self):
         p, _ = QFileDialog.getOpenFileNames(
             self,
@@ -527,17 +505,10 @@ class REGUIApp(QMainWindow):
         self.setInputPath(tuple(p))
 
     def buttonOutputPath_click(self):
-        p, _ = QFileDialog.getSaveFileName(
-            self,
-            filter='Image files (*.png *.gif *.webp)',
-        )
+        p = QFileDialog.getExistingDirectory(self)
         if not p:
             return
         self.entryOutputPath.setText(p)
-
-    def outputPathTraceCallback(self, *args):
-        if not self.outputPathChanged:
-            self.setInputPath(tuple(p.strip() for p in self.entryInputPath.text().split('|')))
 
     def buttonProcess_click(self):
         if self.processing:
@@ -551,14 +522,29 @@ class REGUIApp(QMainWindow):
             self.updateProcessButton()
             return
         try:
-            inputPaths = tuple(p.strip() for p in self.entryInputPath.text().split('|'))
-            outputPaths = tuple(p.strip() for p in self.entryOutputPath.text().split('|'))
-            if not inputPaths or not outputPaths or len(inputPaths) != len(outputPaths):
-                return QMessageBox.warning(self, define.APP_TITLE, '请输入有效的输入和输出路径。')
+            inputPaths = tuple(p.strip() for p in self.entryInputPath.text().split('|') if p.strip())
+            outputDir = os.path.normpath(self.entryOutputPath.text().strip()) if self.entryOutputPath.text().strip() else ''
+            if not inputPaths or not outputDir:
+                return QMessageBox.warning(self, define.APP_TITLE, '请输入有效的输入路径和输出目录。')
+            if not os.path.isdir(outputDir):
+                return QMessageBox.warning(self, define.APP_TITLE, '输出路径不是已存在的目录。')
 
             initialConfigParams = self.getConfigParams()
             if initialConfigParams.resizeMode == param.ResizeMode.RATIO and initialConfigParams.resizeModeValue == 1:
                 return QMessageBox.warning(self, define.APP_TITLE, '放大倍率必须为不小于 2 的整数。')
+
+            # 输出文件名后缀由当前缩放模式生成
+            match param.ResizeMode(self.resizeModeGroup.checkedId()):
+                case param.ResizeMode.RATIO:
+                    suffix = f'x{self.spinResizeRatio.value()}'
+                case param.ResizeMode.WIDTH:
+                    suffix = f'w{self.spinResizeWidth.value()}'
+                case param.ResizeMode.HEIGHT:
+                    suffix = f'h{self.spinResizeHeight.value()}'
+                case param.ResizeMode.LONGEST_SIDE:
+                    suffix = f'l{self.spinResizeLongestSide.value()}'
+                case param.ResizeMode.SHORTEST_SIDE:
+                    suffix = f's{self.spinResizeShortestSide.value()}'
 
             self.progressValue[0] = 0
             self.progressValue[1] = 0
@@ -566,55 +552,31 @@ class REGUIApp(QMainWindow):
             queue = collections.deque()
             # 重建文件列表：每个输入文件一行，行号即任务的 itemId
             self.treeFiles.clear()
-            for inputPath, outputPath in zip(inputPaths, outputPaths):
+            for inputPath in inputPaths:
                 inputPath = os.path.normpath(inputPath)
-                outputPath = os.path.normpath(outputPath)
-                if not os.path.exists(inputPath):
-                    return QMessageBox.warning(self, define.APP_TITLE, '输入的文件或目录不存在。')
-
-                if os.path.isdir(inputPath):
-                    for curDir, dirs, files in os.walk(inputPath):
-                        for f in files:
-                            if os.path.splitext(f)[1].lower() not in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
-                                continue
-                            f = os.path.join(curDir, f)
-                            g = os.path.join(outputPath, f.removeprefix(inputPath + os.path.sep))
-                            itemId = self.addFileItem(f)
-                            if os.path.splitext(f)[1].lower() == '.gif':
-                                queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, queue, self.checkOptimizeGIF.isChecked(), itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                            elif self.entryCustomCommand.text().strip():
-                                t = tempfile.mktemp('.png')
-                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                                queue.append(task.CustomCompressTask(self.sigOutput.emit, t, g, self.entryCustomCommand.text().strip(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                            elif self.checkLossyMode.isChecked():
-                                t = tempfile.mktemp('.webp')
-                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.jpg')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                                queue.append(task.LossyCompressTask(self.sigOutput.emit, t, g, self.spinLossyQuality.value(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                            else:
-                                g = os.path.splitext(g)[0] + ('.webp' if self.checkUseWebP.isChecked() else '.png')
-                                queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, f, g, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                            self.progressValue[2] += 1
-                    if not queue:
-                        return QMessageBox.warning(self, define.APP_TITLE, '文件夹内没有可以处理的图片文件。')
-                elif os.path.splitext(inputPath)[1].lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
-                    self.progressValue[2] += 1
-                    itemId = self.addFileItem(inputPath)
-                    if os.path.splitext(inputPath)[1].lower() == '.gif':
-                        queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, queue, self.checkOptimizeGIF.isChecked(), itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                    elif self.entryCustomCommand.text().strip():
-                        t = tempfile.mktemp('.png')
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                        queue.append(task.CustomCompressTask(self.sigOutput.emit, t, outputPath, self.entryCustomCommand.text().strip(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                    elif self.checkLossyMode.isChecked() and os.path.splitext(outputPath)[1].lower() in {'.jpg', '.jpeg', '.webp'}:
-                        t = tempfile.mktemp('.webp')
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                        queue.append(task.LossyCompressTask(self.sigOutput.emit, t, outputPath, self.spinLossyQuality.value(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
-                    else:
-                        queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                if not os.path.isfile(inputPath):
+                    return QMessageBox.warning(self, define.APP_TITLE, '输入的文件不存在。')
+                base, ext = os.path.splitext(os.path.basename(inputPath))
+                if ext.lower() not in {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff'}:
+                    return QMessageBox.warning(self, define.APP_TITLE, '仅支持 JPEG、PNG、GIF、WebP 和 TIFF 格式的图片文件。')
+                # 输出文件名 = 输出目录/基名 (模型 后缀).扩展名
+                outputBase = os.path.join(outputDir, f'{base} ({self.comboModel.currentText()} {suffix})')
+                self.progressValue[2] += 1
+                itemId = self.addFileItem(inputPath)
+                if ext.lower() == '.gif':
+                    queue.append(task.SplitGIFTask(self.sigOutput.emit, self.progressValue, inputPath, outputBase + '.gif', initialConfigParams, queue, self.checkOptimizeGIF.isChecked(), itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                elif self.entryCustomCommand.text().strip():
+                    t = tempfile.mktemp('.png')
+                    queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                    queue.append(task.CustomCompressTask(self.sigOutput.emit, t, outputBase + '.png', self.entryCustomCommand.text().strip(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                elif self.checkLossyMode.isChecked():
+                    t = tempfile.mktemp('.webp')
+                    outputPath = outputBase + ('.webp' if self.checkUseWebP.isChecked() else '.jpg')
+                    queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, t, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
+                    queue.append(task.LossyCompressTask(self.sigOutput.emit, t, outputPath, self.spinLossyQuality.value(), True, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
                 else:
-                    return QMessageBox.warning(self, define.APP_TITLE, '仅支持 JPEG、PNG、GIF 和 WebP 格式的图片文件。')
+                    outputPath = outputBase + ('.webp' if self.checkUseWebP.isChecked() else '.png')
+                    queue.append(task.RESpawnTask(self.sigOutput.emit, self.progressValue, inputPath, outputPath, initialConfigParams, itemId=itemId, progressCallback=self.taskProgressCallback, cancelEvent=self.cancelEvent))
 
             self.processing = True
             self.processingPaused = False
@@ -635,7 +597,7 @@ class REGUIApp(QMainWindow):
                 self.sigFail.emit(f'{type(ex).__name__}: {ex}')
                 if itemId is not None:
                     self.sigItemState.emit(itemId, 'failed')
-            self.notificationOutputPath = outputPath
+            self.notificationOutputPath = outputDir
             self.notificationTimeStart = ts
 
             self.logFile = open(self.logPath, 'w', encoding='utf-8')
@@ -693,8 +655,8 @@ class REGUIApp(QMainWindow):
 
     def setInputPath(self, paths: tuple[str, ...]):
         self.entryInputPath.setText(' | '.join(paths))
-        self.entryOutputPath.setText(self.getOutputPath(paths))
-        self.outputPathChanged = False
+        # 输出目录默认填第一个输入文件所在目录，用户可再改
+        self.entryOutputPath.setText(os.path.dirname(os.path.abspath(paths[0])) if paths else '')
 
     def writeToOutput(self, s: str):
         if self.logFile:
@@ -779,32 +741,6 @@ class REGUIApp(QMainWindow):
             self.checkPreupscale.isChecked(),
             self.entryCustomCommand.text().strip(),
         )
-
-    def getOutputPath(self, paths: tuple[str, ...]) -> str:
-        r = []
-        for p in paths:
-            if os.path.isdir(p):
-                base, ext = p, ''
-            else:
-                base, ext = os.path.splitext(p)
-                if ext.lower() in {'.jpg', '.tif', '.tiff'} or self.entryCustomCommand.text().strip():
-                    ext = '.png'
-                if ext.lower() == '.png' and self.checkUseWebP.isChecked():
-                    ext = '.webp'
-            suffix = ''
-            match param.ResizeMode(self.resizeModeGroup.checkedId()):
-                case param.ResizeMode.RATIO:
-                    suffix = f'x{self.spinResizeRatio.value()}'
-                case param.ResizeMode.WIDTH:
-                    suffix = f'w{self.spinResizeWidth.value()}'
-                case param.ResizeMode.HEIGHT:
-                    suffix = f'h{self.spinResizeHeight.value()}'
-                case param.ResizeMode.LONGEST_SIDE:
-                    suffix = f'l{self.spinResizeLongestSide.value()}'
-                case param.ResizeMode.SHORTEST_SIDE:
-                    suffix = f's{self.spinResizeShortestSide.value()}'
-            r.append(f'{base} ({self.comboModel.currentText()} {suffix}){ext}')
-        return ' | '.join(r)
 
 # 配置与模型路径在主窗口创建前初始化：
 # 启动时若缺少主程序或模型需要弹出警告，因此必须先完成配置与模型扫描
