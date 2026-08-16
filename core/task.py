@@ -142,72 +142,102 @@ class RESpawnTask(AbstractTask):
         try:
             for i in range(len(files) - 1):
                 inputPath, outputPath = files[i:(i + 2)]
-                alphaOverridePath = None
-                if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
-                    model, modelFilename = self.config.model.split('#', 1)
-                    denoiseLevel = {
-                        'conservative': -1,
-                        'no-denoise': 0,
-                        **{f'denoise{i}x': i for i in range(1, 4)},
-                    }[modelFilename.split('-', 1)[1]]
-                    cmd = (
-                        define.RE_PATH,
-                        '-v',
-                        '-i', inputPath,
-                        '-o', outputPath,
-                        '-s', str(self.config.modelFactor),
-                        '-t', str(self.config.tileSize),
-                        '-m', os.path.join(self.config.modelDir, model),
-                        '-n', str(denoiseLevel),
-                        '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
-                        '-c', '1', # accurate sync
-                        *(('-x', ) if self.config.useTTA else ()),
-                    )
-                else:
-                    cmd = (
-                        define.RE_PATH,
-                        '-v',
-                        '-i', inputPath,
-                        '-o', outputPath,
-                        '-s', str(self.config.modelFactor),
-                        *(('-z', str(self.config.modelFactor)) if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else ()),
-                        '-t', str(self.config.tileSize),
-                        '-n', self.config.model,
-                        '-g', 'auto' if self.config.gpuID < 0 else str(self.config.gpuID),
-                        *(('-x', ) if self.config.useTTA else ()),
-                    )
-                with subprocess.Popen(
-                    cmd,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    encoding='utf-8' if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else None,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                ) as p:
-                    self.process = p
-                    for line in p.stderr:
-                        if self.isCancelRequested():
-                            p.terminate()
-                            try:
-                                p.wait(5)
-                            except subprocess.TimeoutExpired:
-                                p.kill()
-                            raise TaskCancelled()
-                        # 如果输入文件是有alpha通道的图片，但是输出扩展名又是JPG
-                        # Real-ESRGAN会强行给输出的文件名加上PNG的扩展名，导致后续处理找不到文件
-                        # 这里额外加了一个重命名为原来的输出文件名的操作
-                        # https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/blob/37026f49824c5cf84062e7c6a5dd71445dcf610f/src/main.cpp#L283
-                        if m := re.search(r'^image .+? has alpha channel ! .+? will output (.+?)$', line, re.M):
-                            alphaOverridePath = m.group(1)
-                        elif m := re.search(r'(\d+[.,]\d+)%', line):
-                            self.progressValue[0] = (i + float(m.group(1).replace(',', '.')) / 100) / (len(files) - 1)
-                            self.reportProgress(self.progressValue[0])
-                        elif m := re.search(r'^.+? -> .+? done$', line, re.M):
-                            self.progressValue[0] = (i + 1) / (len(files) - 1)
-                            self.reportProgress(self.progressValue[0])
-                        self.outputCallback(line)
-                self.process = None
-                if p.returncode:
-                    raise subprocess.CalledProcessError(p.returncode, cmd)
+                # tileSize 降级梯队：GPU 推理设备丢失（vkQueueSubmit failed 等 Vulkan 错误）时
+                # 逐级缩小拆分尺寸重试，并兜底切换到引擎启动日志里识别到的 CPU 设备（llvmpipe/lavapipe）。
+                # 引擎对 Vulkan 错误不做传播（照样退出码 0 报 done），只信退出码会把纯黑图当成功。
+                tileSizeLadder = [self.config.tileSize] + [
+                    t for t in (512, 256, 128, 64, 32)
+                    if t != self.config.tileSize and (not self.config.tileSize or t < self.config.tileSize)
+                ]
+                cpuGpuID: int | None = None
+                passSucceeded = False
+                for tileSize in tileSizeLadder:
+                    gpuIDCandidates = [self.config.gpuID]
+                    if cpuGpuID is not None and cpuGpuID != self.config.gpuID:
+                        gpuIDCandidates.append(cpuGpuID)
+                    for gpuID in gpuIDCandidates:
+                        alphaOverridePath = None
+                        if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
+                            model, modelFilename = self.config.model.split('#', 1)
+                            denoiseLevel = {
+                                'conservative': -1,
+                                'no-denoise': 0,
+                                **{f'denoise{i}x': i for i in range(1, 4)},
+                            }[modelFilename.split('-', 1)[1]]
+                            cmd = (
+                                define.RE_PATH,
+                                '-v',
+                                '-i', inputPath,
+                                '-o', outputPath,
+                                '-s', str(self.config.modelFactor),
+                                '-t', str(tileSize),
+                                '-m', os.path.join(self.config.modelDir, model),
+                                '-n', str(denoiseLevel),
+                                '-g', 'auto' if gpuID < 0 else str(gpuID),
+                                '-c', '1', # accurate sync
+                                *(('-x', ) if self.config.useTTA else ()),
+                            )
+                        else:
+                            cmd = (
+                                define.RE_PATH,
+                                '-v',
+                                '-i', inputPath,
+                                '-o', outputPath,
+                                '-s', str(self.config.modelFactor),
+                                *(('-z', str(self.config.modelFactor)) if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else ()),
+                                '-t', str(tileSize),
+                                '-n', self.config.model,
+                                '-g', 'auto' if gpuID < 0 else str(gpuID),
+                                *(('-x', ) if self.config.useTTA else ()),
+                            )
+                        # 重试前把进度重置回本趟起点
+                        self.progressValue[0] = i / (len(files) - 1)
+                        self.reportProgress(self.progressValue[0])
+                        vkFailed = False
+                        with subprocess.Popen(
+                            cmd,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True,
+                            encoding='utf-8' if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'upscayl-bin' else None,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                        ) as p:
+                            self.process = p
+                            for line in p.stderr:
+                                if self.isCancelRequested():
+                                    p.terminate()
+                                    try:
+                                        p.wait(5)
+                                    except subprocess.TimeoutExpired:
+                                        p.kill()
+                                    raise TaskCancelled()
+                                # 如果输入文件是有alpha通道的图片，但是输出扩展名又是JPG
+                                # Real-ESRGAN会强行给输出的文件名加上PNG的扩展名，导致后续处理找不到文件
+                                # 这里额外加了一个重命名为原来的输出文件名的操作
+                                # https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/blob/37026f49824c5cf84062e7c6a5dd71445dcf610f/src/main.cpp#L283
+                                if m := re.search(r'^image .+? has alpha channel ! .+? will output (.+?)$', line, re.M):
+                                    alphaOverridePath = m.group(1)
+                                elif m := re.search(r'^\[(\d+)\s+(?:llvmpipe|lavapipe)\b', line, re.I):
+                                    cpuGpuID = int(m.group(1))
+                                elif re.search(r'vk\w+ failed', line):
+                                    vkFailed = True
+                                elif m := re.search(r'(\d+[.,]\d+)%', line):
+                                    self.progressValue[0] = (i + float(m.group(1).replace(',', '.')) / 100) / (len(files) - 1)
+                                    self.reportProgress(self.progressValue[0])
+                                elif m := re.search(r'^.+? -> .+? done$', line, re.M):
+                                    self.progressValue[0] = (i + 1) / (len(files) - 1)
+                                    self.reportProgress(self.progressValue[0])
+                                self.outputCallback(line)
+                        self.process = None
+                        if p.returncode == 0 and not vkFailed:
+                            passSucceeded = True
+                            break
+                        if p.returncode != 0 and not vkFailed:
+                            raise subprocess.CalledProcessError(p.returncode, cmd)
+                        self.outputCallback(f'GPU inference failed (Vulkan error), retrying with next tileSize/gpuID...\n')
+                    if passSucceeded:
+                        break
+                if not passSucceeded:
+                    raise RuntimeError('Real-ESRGAN inference failed: GPU device lost, and all fallback attempts (smaller tileSize and CPU device) were exhausted')
                 if i > 0 or inputPath == inputPathPreupscaled or self.removeInput:
                     os.remove(inputPath)
                 if alphaOverridePath:
