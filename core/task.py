@@ -228,6 +228,10 @@ class RESpawnTask(AbstractTask):
                                     self.reportProgress(self.progressValue[0])
                                 self.outputCallback(line)
                         self.process = None
+                        # GUI 侧（停止按钮/关窗）可能已直接 terminate 引擎导致 stderr 读到 EOF，
+                        # 循环内取消检查没机会触发——这里补判，避免把主动停止误报为失败
+                        if self.isCancelRequested():
+                            raise TaskCancelled()
                         if p.returncode == 0 and not vkFailed:
                             passSucceeded = True
                             break
@@ -485,6 +489,9 @@ class CustomCompressTask(AbstractTask):
                     raise TaskCancelled()
                 self.outputCallback(line)
         self.process = None
+        # 同 RESpawnTask：GUI 侧直接 terminate 时 stderr 读到 EOF，补判主动停止
+        if self.isCancelRequested():
+            raise TaskCancelled()
         if p.returncode:
             raise subprocess.CalledProcessError(p.returncode, cmd)
         if self.removeInput:

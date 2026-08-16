@@ -4,6 +4,7 @@ import itertools
 import notifypy
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -138,6 +139,10 @@ class REGUIApp(QMainWindow):
         self.pauseEvent = threading.Event()
         # 控制是否停止（取消）处理
         self.cancelEvent = threading.Event()
+        # 当前正在执行的任务（taskStartCallback 登记），用于停止/关窗时立即终止其引擎子进程
+        self.currentTask: 'task.AbstractTask | None' = None
+        # 工作线程句柄，关窗时 join 等待收尾
+        self.workerThread: threading.Thread | None = None
 
         self.sigOutput.connect(self.writeToOutput, Qt.ConnectionType.QueuedConnection)
         self.sigComplete.connect(self.onTaskComplete, Qt.ConnectionType.QueuedConnection)
@@ -409,6 +414,8 @@ class REGUIApp(QMainWindow):
         # 暂停状态点停止 = 立即停止：先放行，让工作线程走到取消检查
         self.pauseEvent.set()
         self.processingPaused = False
+        # 立即终止引擎子进程：stderr 循环可能长时间无新行，不能等它走到取消检查
+        self.terminateCurrentEngine()
         self.writeToOutput('正在停止…\n')
         self.updateProcessButton()
 
@@ -465,6 +472,32 @@ class REGUIApp(QMainWindow):
 
     def closeEvent(self, event):
         self.saveConfig()
+        if self.processing:
+            # 处理中关窗需确认，确认后完整停机：取消事件 → 杀引擎子进程 → join 工作线程 → 关日志
+            reply = QMessageBox.question(
+                self,
+                define.APP_TITLE,
+                '正在处理中，确定退出并终止处理？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.writeToOutput('窗口关闭，正在终止处理…\n')
+            self.cancelEvent.set()
+            self.pauseEvent.set()
+            self.terminateCurrentEngine()
+            if self.workerThread is not None:
+                self.workerThread.join(10)
+                if self.workerThread.is_alive():
+                    self.writeToOutput('工作线程未能在 10 秒内退出，关闭窗口后由 daemon 机制兜底回收。\n')
+            if self.logFile is not None:
+                try:
+                    self.logFile.close()
+                except OSError:
+                    pass
+                self.logFile = None
         super().closeEvent(event)
 
     def saveConfig(self):
@@ -600,7 +633,9 @@ class REGUIApp(QMainWindow):
             self.notificationOutputPath = outputDir
             self.notificationTimeStart = ts
 
-            self.logFile = open(self.logPath, 'w', encoding='utf-8')
+            # 行缓冲：处理中途（含异常/卡死）日志实时落盘，不等到 close 才写入
+            self.logFile = open(self.logPath, 'w', encoding='utf-8', buffering=1)
+            # daemon 兜底：即使关窗 join 路径异常，解释器退出时不留下引擎孤儿进程
             t = threading.Thread(
                 target=task.taskRunner,
                 args=(
@@ -613,8 +648,10 @@ class REGUIApp(QMainWindow):
                     self.sigFinally.emit,
                     self.checkIgnoreError.isChecked(),
                     self.taskStartCallback,
-                )
+                ),
+                daemon=True,
             )
+            self.workerThread = t
             t.start()
         except Exception as ex:
             QMessageBox.critical(self, define.APP_TITLE, traceback.format_exc())
@@ -642,6 +679,8 @@ class REGUIApp(QMainWindow):
         self.processingPaused = False
         self.pauseEvent.set()
         self.cancelEvent.clear()
+        self.currentTask = None
+        self.workerThread = None
         self.updateProcessButton()
         if wasCancelled:
             for i in range(self.treeFiles.topLevelItemCount()):
@@ -651,7 +690,9 @@ class REGUIApp(QMainWindow):
                     self.setItemState(item, 'stopped')
                 elif state == 'waiting':
                     self.setItemState(item, 'skipped')
-        self.logFile.close()
+        if self.logFile is not None:
+            self.logFile.close()
+            self.logFile = None
 
     def setInputPath(self, paths: tuple[str, ...]):
         self.entryInputPath.setText(' | '.join(paths))
@@ -711,8 +752,23 @@ class REGUIApp(QMainWindow):
             self.sigItemProgress.emit(itemId, fraction)
 
     def taskStartCallback(self, t: 'task.AbstractTask'):
+        self.currentTask = t
         if t.itemId is not None:
             self.sigItemState.emit(t.itemId, 'processing')
+
+    def terminateCurrentEngine(self):
+        """尽力立即终止当前任务的引擎子进程（不等 stderr 循环走到取消检查），失败不阻断收尾。"""
+        p = getattr(self.currentTask, 'process', None)
+        if p is None or p.poll() is not None:
+            return
+        try:
+            p.terminate()
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        except OSError:
+            pass
 
     def getConfigParams(self) -> param.REConfigParams:
         resizeMode = param.ResizeMode(self.resizeModeGroup.checkedId())

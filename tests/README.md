@@ -14,6 +14,7 @@
 | 脚本 | 用途 | 运行命令 |
 |:--|:---|:---|
 | `smoke_test.py` | 端到端冒烟：offscreen 真实跑引擎，覆盖批处理/GIF/暂停继续/中途停止/扩展名规则/像素级非纯黑断言（30+ 项，需数分钟） | `uv run tests/smoke_test.py` |
+| `exit_chain_test.py` | 退出链路验证：中途停止/处理中关窗时引擎子进程立即回收、无孤儿进程、日志行缓冲实时落盘（需数分钟） | `uv run tests/exit_chain_test.py` |
 | `black_image_probe.py` | 纯黑缺陷视觉验证探针：L0 裸引擎 → L1 任务链 → L2 GIF 链 → L3 多趟 → L4 有损变体 → L5 大图 → L6 用户样本，逐档像素统计 | `uv run tests/black_image_probe.py --tag post` |
 | `theme_smoke_test.py` | 主题手动切换开关冒烟（不跑真实处理，秒级） | `uv run tests/theme_smoke_test.py` |
 
