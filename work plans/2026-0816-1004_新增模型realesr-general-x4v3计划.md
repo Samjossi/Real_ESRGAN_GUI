@@ -1,6 +1,6 @@
 # 新增模型 realesr-general-x4v3 计划
 
-> **状态**：草稿（待用户审阅）
+> **状态**：已完成（2026-08-16 执行完毕，smoke 回归 36/36 通过；默认模型保持 realesrgan-x4plus 不变，经用户确认）
 > **范围**：`models/`（新增 2 个文件）、`模型对比说明.md`、`tests/smoke_test.py`（回归）
 > **时间**：2026-08-16 10:04 (UTC+8)（设计）
 > **优先级**：中
@@ -53,8 +53,17 @@
 - ❌ 不入库 SPAN 社区模型与 Real_SAFMN++（需 pnnx 转换链与新内核引擎，属调研报告第 7 节第二、三步，待本期验证通过后另行立项）；
 - ❌ 不改默认模型（`config.ini` 里 `model = realesrgan-x4plus` 保持，是否改默认由用户实测后决定）。
 
-## 7. 风险与未核实项
+## 7. 风险与未核实项（执行结论）
 
-- ⚠️ x4v3 的 param/bin 需从官方便携包提取，若官方包内实际未包含（调研未逐字节核实），回退方案为从官方 PyTorch 权重走 pnnx 转换，成本上升但仍可行；
-- ⚠️ x4v3 支持 `-dn` 去噪强度调节，但 ncnn 版引擎不支持该参数，只能以默认去噪强度运行——重度退化图效果弱于 x4plus，文档中需如实说明；
-- ⚠️ 速度提升幅度以本机实测为准（T3），公开数据均为 GPU 环境。
+- ✅ 已命中：x4v3 的 param/bin 官方便携包（v0.2.5.0 ubuntu zip）实际未包含，走了回退方案：官方 `realesr-general-x4v3.pth`（SHA-256 `8dc7edb9…`，体积与 GitHub API 元数据一致）→ torchscript → pnnx 20260526 转 ncnn fp32；ncnn python 与 torch 逐层数值对比 max diff 4.4e-6（容差 1e-3），转换与验证脚本留档 `tmp/x4v3_probe/convert_x4v3.py`、`verify_numeric.py`
+- ✅ 已确认：ncnn 版引擎不支持 `-dn` 去噪强度调节，x4v3 只能以默认去噪强度运行，已在 `模型对比说明.md` 如实说明
+- ✅ 速度实测（1024×1024 → 4096×4096，单次）：llvmpipe 软渲染 x4v3 约 10.5 秒 vs x4plus 约 141.5 秒（快约 13.5 倍）；本引擎不支持 `-g -1` 纯 CPU 参数（报 invalid gpu device）
+
+## 8. 执行记录（2026-08-16）
+
+- **兼容性修复**：2022 版引擎硬编码输入/输出 blob 名 `data`/`output`，而新版 pnnx 产出 `in0`/`out0`，直接放入会输出纯黑；已对 param 做改名处理（`in0→data`、`out0→output`），并固化进转换脚本
+- **T2 裸跑验证**：RADV 核显与 llvmpipe 两路径输出均 256×256、非纯黑，与 x4plus 输出平均像素差 1.13
+- **附带发现**：本机 RADV 核显路径下 x4plus 处理 ≥512×512 输入输出纯黑（既有环境缺陷，与本次新增无关），已写入 `模型对比说明.md`
+- **T4 视觉对比**：`tmp/x4v3_probe/对比_实拍整图.png`、`对比_浪花细节.png`，x4v3 略平滑、差异符合官方「质量略低」定位，用户已过目
+- **T6 回归**：`uv run tests/smoke_test.py` 36/36 全部通过（计划编写时为 35 项，执行时测试已增至 36 项）
+- **开发环境说明**：转换需在 `.venv` 安装 torch（CPU 版）/pnnx/ncnn/numpy，仅开发用，未写入 `requirements.txt`
