@@ -13,4 +13,5 @@ AGENTS
 - `bin/`：推理引擎二进制（`realesrgan-ncnn-vulkan`，git 忽略不入库），`define.py` 优先在 `bin/` 探测、兼容程序同级旧布局
 - `asset/icons/`：图标资源（png/ico/icns/psd），`core/main.py` 与打包配置均从此处引用
 - `asset/packaging/`：打包构建配置（`Info.plist`、两个 build 脚本、两个 `.spec`）
+- `tests/`：测试脚本（冒烟、纯黑探针、主题/迁移验证），从项目根 `uv run tests/xxx.py` 直跑，产物落 `tmp/`，详见 `tests/README.md`
 - 打包时从项目根目录执行，并显式传入 `.spec` 完整路径，例如 `pyinstaller asset/packaging/realesrgan-gui.spec`
