@@ -9,7 +9,7 @@ AGENTS
 
 目录说明：
 
-- `core/`：Python 源码（`main.py` 主入口、`task.py`、`define.py`、`param.py`），启动命令 `uv run core/main.py`；根目录另有 `main.py` 启动器（仅转发到 `core/main.py`），也可 `uv run main.py`
+- `core/`：Python 源码（`main.py` 主入口、`task.py`、`define.py`、`param.py`、`download.py` 模型下载器），启动命令 `uv run core/main.py`；根目录另有 `main.py` 启动器（仅转发到 `core/main.py`），也可 `uv run main.py`
 - `bin/`：推理引擎二进制（`realesrgan-ncnn-vulkan`，git 忽略不入库），`define.py` 优先在 `bin/` 探测、兼容程序同级旧布局
 - `asset/icons/`：图标资源（png/ico/icns/psd），`core/main.py` 与打包配置均从此处引用
 - `asset/packaging/`：打包构建配置（`Info.plist`、两个 build 脚本、两个 `.spec`）

@@ -47,6 +47,7 @@ from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
 import define
+import download
 import param
 import task
 
@@ -105,20 +106,7 @@ class REGUIApp(QMainWindow):
 
     def __init__(self, config: configparser.ConfigParser, models: list[str]):
         super().__init__()
-        self.models = models
-        for m in (
-            'realesrgan-x4plus',
-            'realesrgan-x4plus-anime',
-        )[::-1]:
-            try:
-                self.models.insert(0, self.models.pop(self.models.index(m)))
-            except ValueError:
-                pass
-        self.modelFactors: dict[str, int] = {}
-        for m in self.models:
-            self.modelFactors[m] = 4
-            if s := re.search(r'(\d+)x|x(\d+)', m):
-                self.modelFactors[m] = int(s.group(1) or s.group(2))
+        self.setModels(models)
 
         self.downsample = (
             ('Lanczos', Image.Resampling.LANCZOS),
@@ -162,6 +150,33 @@ class REGUIApp(QMainWindow):
             self.writeToOutput(f"Using custom model dir: {self.config['Config'].get('ModelDir')}\n")
         if self.config['Config'].get('Upscaler'):
             self.writeToOutput(f"Using custom upscaler executable: {self.config['Config'].get('Upscaler')}\nThe executable (and models) may be incompatible with Real-ESRGAN-ncnn-vulkan. Use at your own risk!\n")
+
+    def currentModelDir(self) -> str:
+        """当前生效的模型目录：配置值优先，为空回退程序同级 models/。"""
+        return self.config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models')
+
+    def setModels(self, models: list[str]):
+        """更新模型列表与倍率表，并刷新模型下拉框（启动与「重新扫描」共用）。"""
+        self.models = list(models)
+        for m in (
+            'realesrgan-x4plus',
+            'realesrgan-x4plus-anime',
+        )[::-1]:
+            try:
+                self.models.insert(0, self.models.pop(self.models.index(m)))
+            except ValueError:
+                pass
+        self.modelFactors: dict[str, int] = {}
+        for m in self.models:
+            self.modelFactors[m] = 4
+            if s := re.search(r'(\d+)x|x(\d+)', m):
+                self.modelFactors[m] = int(s.group(1) or s.group(2))
+        if hasattr(self, 'comboModel'):
+            # 重扫后尽量保留原选中模型
+            previous = self.comboModel.currentText()
+            self.comboModel.clear()
+            self.comboModel.addItems(self.models)
+            self.comboModel.setCurrentIndex(self.models.index(previous) if previous in self.models else 0)
 
     def setupWidgets(self):
         central = QWidget(self)
@@ -295,6 +310,21 @@ class REGUIApp(QMainWindow):
         advancedLayout.addLayout(leftColumn, 1)
 
         rightColumnAdv = QVBoxLayout()
+        self.labelModelDir = QLabel('模型目录（改动即时生效并保存）', self.frameAdvancedConfig)
+        rightColumnAdv.addWidget(self.labelModelDir)
+        modelDirRow = QHBoxLayout()
+        self.entryModelDir = QLineEdit(self.frameAdvancedConfig)
+        self.entryModelDir.setReadOnly(True)
+        modelDirRow.addWidget(self.entryModelDir, 1)
+        self.buttonBrowseModelDir = QPushButton('浏览…', self.frameAdvancedConfig)
+        self.buttonBrowseModelDir.clicked.connect(self.buttonBrowseModelDir_click)
+        modelDirRow.addWidget(self.buttonBrowseModelDir)
+        self.buttonRescanModels = QPushButton('重新扫描', self.frameAdvancedConfig)
+        self.buttonRescanModels.clicked.connect(self.rescanModels)
+        modelDirRow.addWidget(self.buttonRescanModels)
+        rightColumnAdv.addLayout(modelDirRow)
+        # 处理中禁用，防止任务运行中换目录导致引擎 -m 参数指向失效
+        self.modelDirWidgets = (self.entryModelDir, self.buttonBrowseModelDir, self.buttonRescanModels)
         self.checkDarkMode = QCheckBox('深色模式（立即生效，重启后保持）', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkDarkMode)
         self.checkUseWebP = QCheckBox('优先保存为无损 WebP', self.frameAdvancedConfig)
@@ -396,6 +426,7 @@ class REGUIApp(QMainWindow):
         self.checkPreupscale.setChecked(c.getboolean('Preupscale'))
         # 主题：缺失或非法值时默认浅色
         self.checkDarkMode.setChecked(c.get('Theme', fallback='Light') == 'Dark')
+        self.entryModelDir.setText(self.currentModelDir())
         self.entryCustomCommand.setText(c.get('CustomCommand'))
 
         self.updateProcessButton()
@@ -414,6 +445,27 @@ class REGUIApp(QMainWindow):
         self.buttonProcess.setText(('继续' if self.processingPaused else '暂停') if self.processing else '开始')
         self.setButtonAccent(self.buttonProcess, not (self.processing and not self.processingPaused))
         self.buttonStop.setEnabled(self.processing and not self.cancelEvent.is_set())
+        for w in self.modelDirWidgets:
+            w.setEnabled(not self.processing)
+
+    def buttonBrowseModelDir_click(self):
+        p = QFileDialog.getExistingDirectory(self, dir=self.entryModelDir.text())
+        if not p:
+            return
+        self.config['Config']['ModelDir'] = p
+        self.rescanModels()
+        self.saveConfig()
+
+    def rescanModels(self):
+        """重扫当前模型目录并刷新下拉框（改动目录或手动拷贝模型后用）。"""
+        modelDir = self.currentModelDir()
+        models = scan_models(modelDir)
+        self.setModels(models)
+        self.entryModelDir.setText(modelDir)
+        if models:
+            self.writeToOutput(f'模型目录：{modelDir}（扫到 {len(models)} 个模型）\n')
+        else:
+            self.writeToOutput(f'模型目录：{modelDir}（未扫到任何模型，请下载或手动放置成对的 .bin/.param 后重新扫描）\n')
 
     def buttonStop_click(self):
         if not self.processing or self.cancelEvent.is_set():
@@ -575,6 +627,9 @@ class REGUIApp(QMainWindow):
                 return QMessageBox.warning(self, define.APP_TITLE, '请输入有效的输入路径和输出目录。')
             if not os.path.isdir(outputDir):
                 return QMessageBox.warning(self, define.APP_TITLE, '输出路径不是已存在的目录。')
+
+            if not self.models:
+                return QMessageBox.warning(self, define.APP_TITLE, '没有可用的模型。\n请到「高级设定」重新扫描模型目录，或重启程序使用模型下载引导。')
 
             initialConfigParams = self.getConfigParams()
             if initialConfigParams.resizeMode == param.ResizeMode.RATIO and initialConfigParams.resizeModeValue == 1:
@@ -810,7 +865,7 @@ class REGUIApp(QMainWindow):
         return param.REConfigParams(
             self.comboModel.currentText(),
             self.modelFactors[self.comboModel.currentText()],
-            self.config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models'),
+            self.currentModelDir(),
             resizeMode,
             resizeModeValue,
             self.downsample[self.comboDownsample.currentIndex()][1],
@@ -820,6 +875,190 @@ class REGUIApp(QMainWindow):
             self.checkPreupscale.isChecked(),
             self.entryCustomCommand.text().strip(),
         )
+
+# 模型扫描在启动与运行中（「重新扫描」按钮、下载引导完成后）共用，避免逻辑分叉
+def scan_models(modelDir: str) -> list[str]:
+    """扫描目录下可用的模型（.bin/.param 成对），目录不存在返回空列表。"""
+    try:
+        if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
+            # 兼容Real-CUGAN的模型文件名格式
+            # https://github.com/nihui/realcugan-ncnn-vulkan/blob/395302c5c70f1bff604c974e92e0a87e45c9f9ee/src/main.cpp#L733
+            # -m model-path
+            # -s scale
+            # -n noise-level
+            # <model-path>/up<scale>x-conservative.{param,bin}
+            # <model-path>/up<scale>x-no-denoise.{param,bin}
+            # <model-path>/up<scale>x-denoise<noise-level>x.{param,bin}
+            models = []
+            for name, scale, noise in itertools.product(
+                sorted(x for x in os.listdir(modelDir) if os.path.isdir(os.path.join(modelDir, x))),
+                range(2, 5),
+                ('conservative', 'no-denoise', *(f'denoise{i}x' for i in range(1, 4))),
+            ):
+                if all(os.path.exists(os.path.join(modelDir, name, f'up{scale}x-{noise}.{ext}')) for ext in ('bin', 'param')):
+                    models.append(f'{name}#up{scale}x-{noise}')
+        else:
+            modelFiles = set(x for x in os.listdir(modelDir) if os.path.isfile(os.path.join(modelDir, x)))
+            models = sorted(
+                x for x in set(os.path.splitext(y)[0] for y in modelFiles)
+                if f'{x}.bin' in modelFiles and f'{x}.param' in modelFiles
+            )
+    except FileNotFoundError:
+        # in case of FileNotFoundError exception, return empty modelFiles and models.
+        models = []
+    return models
+
+class ModelDownloadDialog(QDialog):
+    """首启未检测到模型时的下载引导：选目录 → 勾选模型 → 下载（带进度、可取消），可随时跳过。"""
+
+    # 下载在后台线程执行，进度/结果通过信号投递回 UI 线程（与 task.py 的模式一致）
+    sigProgress = Signal(str, int, int)
+    sigDownloadDone = Signal(list)
+
+    def __init__(self, config: configparser.ConfigParser, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.config = config
+        self.setWindowTitle('模型下载引导')
+        self.setModal(True)
+        self.cancelEvent = threading.Event()
+        self.downloading = False
+        self.errors: list[str] = []
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            '未检测到任何模型。请选择模型存放目录并勾选要下载的模型；\n'
+            '也可以点「跳过」，稍后自行把成对的 .bin/.param 模型文件放入目录，\n'
+            '再到「高级设定」点「重新扫描」。',
+            self,
+        ))
+
+        dirRow = QHBoxLayout()
+        self.entryDir = QLineEdit(self)
+        self.entryDir.setText(self.config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models'))
+        dirRow.addWidget(self.entryDir, 1)
+        self.buttonBrowse = QPushButton('浏览…', self)
+        self.buttonBrowse.clicked.connect(self.browseDir_click)
+        dirRow.addWidget(self.buttonBrowse)
+        layout.addLayout(dirRow)
+
+        self.checks: list[QCheckBox] = []
+        for entry in download.MODEL_MANIFEST:
+            cb = QCheckBox(f"{entry['name']} — {entry['description']}", self)
+            cb.setChecked(True)
+            cb.entry = entry
+            self.checks.append(cb)
+            layout.addWidget(cb)
+
+        self.labelStatus = QLabel('', self)
+        layout.addWidget(self.labelStatus)
+        self.progressBar = QProgressBar(self, minimum=0, maximum=100)
+        layout.addWidget(self.progressBar)
+
+        buttonRow = QHBoxLayout()
+        buttonRow.addStretch(1)
+        self.buttonDownload = QPushButton('开始下载', self)
+        self.buttonDownload.clicked.connect(self.startDownload)
+        buttonRow.addWidget(self.buttonDownload)
+        self.buttonCancelDl = QPushButton('取消下载', self)
+        self.buttonCancelDl.setEnabled(False)
+        self.buttonCancelDl.clicked.connect(self.cancelEvent.set)
+        buttonRow.addWidget(self.buttonCancelDl)
+        self.buttonSkip = QPushButton('跳过', self)
+        self.buttonSkip.clicked.connect(self.skip_click)
+        buttonRow.addWidget(self.buttonSkip)
+        layout.addLayout(buttonRow)
+
+        self.sigProgress.connect(self.onProgress, Qt.ConnectionType.QueuedConnection)
+        self.sigDownloadDone.connect(self.onDownloadDone, Qt.ConnectionType.QueuedConnection)
+
+    def browseDir_click(self):
+        p = QFileDialog.getExistingDirectory(self, dir=self.entryDir.text())
+        if p:
+            self.entryDir.setText(p)
+
+    def setDownloading(self, downloading: bool):
+        self.downloading = downloading
+        self.buttonDownload.setEnabled(not downloading)
+        self.buttonCancelDl.setEnabled(downloading)
+        self.entryDir.setEnabled(not downloading)
+        self.buttonBrowse.setEnabled(not downloading)
+        for cb in self.checks:
+            cb.setEnabled(not downloading)
+
+    def startDownload(self):
+        destDir = self.entryDir.text().strip()
+        if not destDir:
+            return QMessageBox.warning(self, define.APP_TITLE, '请先选择模型存放目录。')
+        try:
+            os.makedirs(destDir, exist_ok=True)
+        except OSError as ex:
+            return QMessageBox.warning(self, define.APP_TITLE, f'无法创建目录：{destDir}\n{ex}')
+        if not os.access(destDir, os.W_OK):
+            return QMessageBox.warning(self, define.APP_TITLE, f'目录不可写：{destDir}\n请换一个有写权限的目录（如用户目录下）。')
+        selected = [cb.entry for cb in self.checks if cb.isChecked()]
+        if not selected:
+            return QMessageBox.warning(self, define.APP_TITLE, '请至少勾选一个模型。')
+
+        self.errors = []
+        self.cancelEvent.clear()
+        self.setDownloading(True)
+
+        def run():
+            # 同一 zip 来源在一次批量下载中只拉取一次
+            zipCache: dict = {}
+            for entry in selected:
+                try:
+                    download.download_model(
+                        entry,
+                        destDir,
+                        lambda n, d, t: self.sigProgress.emit(n, d, t),
+                        self.cancelEvent,
+                        zipCache,
+                    )
+                except download.DownloadCancelled:
+                    break
+                except download.DownloadError as ex:
+                    self.errors.append(str(ex))
+            for p in zipCache.values():
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            self.sigDownloadDone.emit(self.errors)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def onProgress(self, name: str, done: int, total: int):
+        self.labelStatus.setText(f'正在下载：{name}')
+        if total:
+            self.progressBar.setValue(round(done * 100 / total))
+
+    def onDownloadDone(self, errors: list[str]):
+        self.setDownloading(False)
+        destDir = self.entryDir.text().strip()
+        if self.cancelEvent.is_set():
+            # 用户取消：停留在对话框，可重试或跳过
+            self.labelStatus.setText('下载已取消。')
+            return
+        if scan_models(destDir):
+            # 扫到模型才算完成：写入配置持久化后进入主界面
+            defaultDir = os.path.join(define.APP_PATH, 'models')
+            self.config['Config']['ModelDir'] = '' if os.path.realpath(destDir) == os.path.realpath(defaultDir) else destDir
+            if errors:
+                QMessageBox.warning(self, define.APP_TITLE, '部分模型下载失败：\n\n' + '\n\n'.join(errors) + '\n\n已下载的模型可直接使用。')
+            self.accept()
+        else:
+            QMessageBox.warning(
+                self,
+                define.APP_TITLE,
+                '未能成功下载任何模型：\n\n' + ('\n\n'.join(errors) or '未知错误。')
+                + '\n\n可重新勾选后重试，或点「跳过」稍后手动放置模型。',
+            )
+
+    def skip_click(self):
+        if self.downloading:
+            self.cancelEvent.set()
+        self.reject()
 
 # 配置与模型路径在主窗口创建前初始化：
 # 启动时若缺少主程序或模型需要弹出警告，因此必须先完成配置与模型扫描
@@ -852,36 +1091,13 @@ def init_config_and_model_paths() -> tuple[configparser.ConfigParser, list[str]]
     if config['Config'].get('Upscaler'):
         define.RE_PATH = os.path.realpath(config['Config'].get('Upscaler'))
 
-    try:
-        modelDir = config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models')
-        if os.path.splitext(os.path.split(define.RE_PATH)[1])[0] == 'realcugan-ncnn-vulkan':
-            # 兼容Real-CUGAN的模型文件名格式
-            # https://github.com/nihui/realcugan-ncnn-vulkan/blob/395302c5c70f1bff604c974e92e0a87e45c9f9ee/src/main.cpp#L733
-            # -m model-path
-            # -s scale
-            # -n noise-level
-            # <model-path>/up<scale>x-conservative.{param,bin}
-            # <model-path>/up<scale>x-no-denoise.{param,bin}
-            # <model-path>/up<scale>x-denoise<noise-level>x.{param,bin}
-            models = []
-            for name, scale, noise in itertools.product(
-                sorted(x for x in os.listdir(modelDir) if os.path.isdir(os.path.join(modelDir, x))),
-                range(2, 5),
-                ('conservative', 'no-denoise', *(f'denoise{i}x' for i in range(1, 4))),
-            ):
-                if all(os.path.exists(os.path.join(modelDir, name, f'up{scale}x-{noise}.{ext}')) for ext in ('bin', 'param')):
-                    models.append(f'{name}#up{scale}x-{noise}')
-        else:
-            modelFiles = set(x for x in os.listdir(modelDir) if os.path.isfile(os.path.join(modelDir, x)))
-            models = sorted(
-                x for x in set(os.path.splitext(y)[0] for y in modelFiles)
-                if f'{x}.bin' in modelFiles and f'{x}.param' in modelFiles
-            )
-    except FileNotFoundError:
-        # in case of FileNotFoundError exception, return empty modelFiles and models.
-        # This does not change any behabiour because in this case
-        # we will be showing a warning message and terminate app
-        models = []
+    defaultModelDir = os.path.join(define.APP_PATH, 'models')
+    modelDir = config['Config'].get('ModelDir') or defaultModelDir
+    models = scan_models(modelDir)
+    if not models and modelDir != defaultModelDir:
+        # 配置的模型目录失效（不存在或扫不到模型）：回退默认目录重扫，并清空非法值避免反复踩坑
+        config['Config']['ModelDir'] = ''
+        models = scan_models(defaultModelDir)
 
     return config, models
 
@@ -892,10 +1108,16 @@ if __name__ == '__main__':
 
     config, models = init_config_and_model_paths()
 
-    if not os.path.exists(define.RE_PATH) or not models:
+    if not os.path.exists(define.RE_PATH):
         QMessageBox.warning(None, define.APP_TITLE, '未找到 Real-ESRGAN-ncnn-vulkan 主程序。\n请前往 https://github.com/xinntao/Real-ESRGAN/releases 下载，并将本文件和主程序放在同一目录下。')
         webbrowser.open_new_tab('https://github.com/xinntao/Real-ESRGAN/releases')
         sys.exit(0)
+
+    if not models:
+        # 首启或模型目录失效：弹出下载引导而不是直接退出；可跳过，稍后手动放置模型
+        dialog = ModelDownloadDialog(config)
+        dialog.exec()
+        models = scan_models(config['Config'].get('ModelDir') or os.path.join(define.APP_PATH, 'models'))
 
     app = REGUIApp(config, models)
     app.setWindowTitle(define.APP_TITLE)
