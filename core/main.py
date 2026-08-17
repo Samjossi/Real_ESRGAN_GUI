@@ -14,7 +14,9 @@ import typing
 import webbrowser
 from PIL import Image
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QUrl
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import QFont
 from PySide6.QtGui import QIcon
 from PySide6.QtGui import QPixmap
@@ -94,6 +96,8 @@ class REGUIApp(QMainWindow):
     sigOutput = Signal(str)
     sigComplete = Signal(bool)
     sigFail = Signal(str)
+    # 引擎崩溃时投递友好提示，GUI 线程弹窗告知用户如何处理
+    sigEngineCrash = Signal(str)
     sigFinally = Signal()
     # 文件列表行状态/进度（itemId, state）与（itemId, 0~1 的进度）
     sigItemState = Signal(int, str)
@@ -147,6 +151,7 @@ class REGUIApp(QMainWindow):
         self.sigOutput.connect(self.writeToOutput, Qt.ConnectionType.QueuedConnection)
         self.sigComplete.connect(self.onTaskComplete, Qt.ConnectionType.QueuedConnection)
         self.sigFail.connect(self.onTaskFail, Qt.ConnectionType.QueuedConnection)
+        self.sigEngineCrash.connect(self.onEngineCrash, Qt.ConnectionType.QueuedConnection)
         self.sigFinally.connect(self.onTaskFinally, Qt.ConnectionType.QueuedConnection)
         self.sigItemState.connect(self.onItemState, Qt.ConnectionType.QueuedConnection)
         self.sigItemProgress.connect(self.onItemProgress, Qt.ConnectionType.QueuedConnection)
@@ -190,6 +195,9 @@ class REGUIApp(QMainWindow):
         self.buttonOutputPath = QPushButton('浏览', self.frameBasicConfig)
         self.buttonOutputPath.clicked.connect(self.buttonOutputPath_click)
         outputRow.addWidget(self.buttonOutputPath)
+        self.buttonOpenOutput = QPushButton('打开目录', self.frameBasicConfig)
+        self.buttonOpenOutput.clicked.connect(self.buttonOpenOutput_click)
+        outputRow.addWidget(self.buttonOpenOutput)
         basicLayout.addLayout(outputRow)
 
         bottomRow = QHBoxLayout()
@@ -543,6 +551,12 @@ class REGUIApp(QMainWindow):
             return
         self.entryOutputPath.setText(p)
 
+    def buttonOpenOutput_click(self):
+        p = self.entryOutputPath.text().strip()
+        if not p or not os.path.isdir(p):
+            return QMessageBox.warning(self, define.APP_TITLE, '输出目录不存在，请先设置有效的输出目录。')
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.normpath(p)))
+
     def buttonProcess_click(self):
         if self.processing:
             if self.processingPaused:
@@ -627,7 +641,12 @@ class REGUIApp(QMainWindow):
             def completeCallback(withError: bool):
                 self.sigComplete.emit(withError)
             def failCallback(ex: Exception, itemId: int | None = None):
-                self.sigFail.emit(f'{type(ex).__name__}: {ex}')
+                if isinstance(ex, task.EngineCrashError):
+                    # 引擎崩溃：通知与弹窗都用友好提示，不带异常类型名
+                    self.sigFail.emit(str(ex))
+                    self.sigEngineCrash.emit(str(ex))
+                else:
+                    self.sigFail.emit(f'{type(ex).__name__}: {ex}')
                 if itemId is not None:
                     self.sigItemState.emit(itemId, 'failed')
             self.notificationOutputPath = outputDir
@@ -671,6 +690,10 @@ class REGUIApp(QMainWindow):
             self.notification.title = '处理失败'
             self.notification.message = message
             self.notification.send(False)
+
+    def onEngineCrash(self, message: str):
+        # 引擎崩溃（如 SIGSEGV）：弹窗提示用户原因与处理建议，程序本身不退出
+        QMessageBox.warning(self, define.APP_TITLE, message)
 
     def onTaskFinally(self):
         # 用户主动停止时：处理中的行标记为“已停止”，等待中的行标记为“未处理”

@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import tempfile
 import time
 import threading
@@ -20,6 +21,10 @@ import param
 
 class TaskCancelled(Exception):
     """用户主动停止处理时抛出，不作为失败处理。"""
+    pass
+
+class EngineCrashError(Exception):
+    """引擎进程异常退出（如段错误），消息为面向用户的友好提示，不自动降级重试。"""
     pass
 
 class AbstractTask:
@@ -236,7 +241,18 @@ class RESpawnTask(AbstractTask):
                             passSucceeded = True
                             break
                         if p.returncode != 0 and not vkFailed:
-                            raise subprocess.CalledProcessError(p.returncode, cmd)
+                            # 引擎崩溃（如 SIGSEGV 段错误）：不自动降级重试，抛出友好提示让用户处理
+                            if p.returncode < 0:
+                                try:
+                                    sigName = signal.Signals(-p.returncode).name
+                                except ValueError:
+                                    sigName = f'信号 {-p.returncode}'
+                                raise EngineCrashError(
+                                    f'Real-ESRGAN 引擎崩溃（{sigName}）。\n'
+                                    '通常是「自动决定」的拆分大小在当前图片上超出显存/内存承受能力。\n'
+                                    '请到「高级设定」把拆分大小改为固定值（建议 256，仍失败再试 128 或 64）后重试。'
+                                )
+                            raise EngineCrashError(f'Real-ESRGAN 引擎异常退出（退出码 {p.returncode}）。')
                         self.outputCallback(f'GPU inference failed (Vulkan error), retrying with next tileSize/gpuID...\n')
                     if passSucceeded:
                         break
@@ -529,6 +545,14 @@ def taskRunner(
         except TaskCancelled:
             cancelled = True
             break
+        except EngineCrashError as ex:
+            # 引擎崩溃：日志只写友好提示，不刷 traceback
+            withError = True
+            outputCallback(f'{ex}\n')
+            failCallback(ex, getattr(currentTask, 'itemId', None))
+            if not ignoreError:
+                finallyCallback()
+                return
         except Exception as ex:
             withError = True
             outputCallback(traceback.format_exc())
