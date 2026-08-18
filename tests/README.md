@@ -18,6 +18,7 @@
 | `black_image_probe.py` | 纯黑缺陷视觉验证探针：L0 裸引擎 → L1 任务链 → L2 GIF 链 → L3 多趟 → L4 有损变体 → L5 大图 → L6 用户样本，逐档像素统计 | `uv run tests/black_image_probe.py --tag post` |
 | `theme_smoke_test.py` | 主题手动切换开关冒烟（不跑真实处理，秒级） | `uv run tests/theme_smoke_test.py` |
 | `verify_model_download.py` | 模型目录自选与下载功能验证：离线夹具覆盖直链/zip 下载、SHA-256 校验、取消、重扫、`ModelDir` 失效回退（秒级） | `uv run tests/verify_model_download.py` |
+| `verify_model_settings_tab.py` | 「模型设定」标签页与一键下载全部模型验证：批量下载/跳过判定/错误收集/取消、标签结构、一键下载完整流程、处理中与下载中互斥（秒级） | `uv run tests/verify_model_settings_tab.py` |
 
 ## 历史一次性验证脚本（留档）
 

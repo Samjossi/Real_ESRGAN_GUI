@@ -4,7 +4,7 @@
 - 分块下载写 .part 临时文件，完成后 os.replace 原子改名；
 - 下载/解压后逐文件比对 SHA-256，不符即删除并报错；
 - 支持直链文件与官方 zip 便携包内成员两种来源；
-- 不做断点续传与自动重试，失败由用户重新勾选下载。
+- 不做断点续传与自动重试，失败由用户重新勾选下载（首启引导）或再次一键下载（「模型设定」页）。
 """
 
 import hashlib
@@ -181,6 +181,45 @@ def _extract_zip_member(
         progress_cb(os.path.basename(dest), len(data), len(data))
     # 把校验结果透传给调用方统一比对
     return h
+
+
+def model_verified(entry: dict, dest_dir: str) -> bool:
+    """清单条目是否已安装且完好：逐文件比对 SHA-256，任一缺失或不符即视为未安装。"""
+    for fileEntry in entry['files']:
+        path = os.path.join(dest_dir, fileEntry['filename'])
+        if not os.path.isfile(path) or sha256_file(path) != fileEntry['sha256']:
+            return False
+    return True
+
+
+def download_models(
+    entries: typing.Iterable[dict],
+    dest_dir: str,
+    progress_cb: typing.Callable[[str, int, int], None] | None = None,
+    cancel_event=None,
+) -> list[str]:
+    """批量下载清单条目到 dest_dir，返回错误信息列表（空列表 = 全部成功）。
+
+    同一 zip 来源在一次批量下载中只拉取一次，结束后清理缓存。
+    用户取消（DownloadCancelled）时中断剩余下载，已下载部分保留。
+    """
+    errors: list[str] = []
+    zipCache: dict = {}
+    try:
+        for entry in entries:
+            try:
+                download_model(entry, dest_dir, progress_cb, cancel_event, zipCache)
+            except DownloadCancelled:
+                break
+            except DownloadError as ex:
+                errors.append(str(ex))
+    finally:
+        for p in zipCache.values():
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    return errors
 
 
 def download_model(

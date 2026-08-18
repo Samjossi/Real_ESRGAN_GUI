@@ -103,6 +103,9 @@ class REGUIApp(QMainWindow):
     # 文件列表行状态/进度（itemId, state）与（itemId, 0~1 的进度）
     sigItemState = Signal(int, str)
     sigItemProgress = Signal(int, float)
+    # 「模型设定」页一键下载：进度（文件名, 已下载字节, 总字节）与完成（错误列表, 跳过数）
+    sigModelDownloadProgress = Signal(str, int, int)
+    sigModelDownloadDone = Signal(list, int)
 
     def __init__(self, config: configparser.ConfigParser, models: list[str]):
         super().__init__()
@@ -131,6 +134,9 @@ class REGUIApp(QMainWindow):
         self.pauseEvent = threading.Event()
         # 控制是否停止（取消）处理
         self.cancelEvent = threading.Event()
+        # 「模型设定」页一键下载状态：与超分任务互斥，可取消
+        self.downloadingModels = False
+        self.downloadCancelEvent = threading.Event()
         # 当前正在执行的任务（taskStartCallback 登记），用于停止/关窗时立即终止其引擎子进程
         self.currentTask: 'task.AbstractTask | None' = None
         # 工作线程句柄，关窗时 join 等待收尾
@@ -143,6 +149,8 @@ class REGUIApp(QMainWindow):
         self.sigFinally.connect(self.onTaskFinally, Qt.ConnectionType.QueuedConnection)
         self.sigItemState.connect(self.onItemState, Qt.ConnectionType.QueuedConnection)
         self.sigItemProgress.connect(self.onItemProgress, Qt.ConnectionType.QueuedConnection)
+        self.sigModelDownloadProgress.connect(self.onModelDownloadProgress, Qt.ConnectionType.QueuedConnection)
+        self.sigModelDownloadDone.connect(self.onModelDownloadDone, Qt.ConnectionType.QueuedConnection)
 
         self.setupWidgets()
 
@@ -310,21 +318,6 @@ class REGUIApp(QMainWindow):
         advancedLayout.addLayout(leftColumn, 1)
 
         rightColumnAdv = QVBoxLayout()
-        self.labelModelDir = QLabel('模型目录（改动即时生效并保存）', self.frameAdvancedConfig)
-        rightColumnAdv.addWidget(self.labelModelDir)
-        modelDirRow = QHBoxLayout()
-        self.entryModelDir = QLineEdit(self.frameAdvancedConfig)
-        self.entryModelDir.setReadOnly(True)
-        modelDirRow.addWidget(self.entryModelDir, 1)
-        self.buttonBrowseModelDir = QPushButton('浏览…', self.frameAdvancedConfig)
-        self.buttonBrowseModelDir.clicked.connect(self.buttonBrowseModelDir_click)
-        modelDirRow.addWidget(self.buttonBrowseModelDir)
-        self.buttonRescanModels = QPushButton('重新扫描', self.frameAdvancedConfig)
-        self.buttonRescanModels.clicked.connect(self.rescanModels)
-        modelDirRow.addWidget(self.buttonRescanModels)
-        rightColumnAdv.addLayout(modelDirRow)
-        # 处理中禁用，防止任务运行中换目录导致引擎 -m 参数指向失效
-        self.modelDirWidgets = (self.entryModelDir, self.buttonBrowseModelDir, self.buttonRescanModels)
         self.checkDarkMode = QCheckBox('深色模式（立即生效，重启后保持）', self.frameAdvancedConfig)
         rightColumnAdv.addWidget(self.checkDarkMode)
         self.checkUseWebP = QCheckBox('优先保存为无损 WebP', self.frameAdvancedConfig)
@@ -341,6 +334,47 @@ class REGUIApp(QMainWindow):
         rightColumnAdv.addWidget(self.checkPreupscale)
         rightColumnAdv.addStretch(1)
         advancedLayout.addLayout(rightColumnAdv, 3)
+
+        # ---- 模型设定 ----
+        # 模型相关设置集中于此：目录选择（从高级设定移入）+ 安装状态 + 一键下载全部模型
+        self.frameModelConfig = QWidget(self)
+        modelLayout = QVBoxLayout(self.frameModelConfig)
+        modelLayout.setContentsMargins(5, 5, 5, 5)
+
+        self.labelModelDir = QLabel('模型目录（改动即时生效并保存）', self.frameModelConfig)
+        modelLayout.addWidget(self.labelModelDir)
+        modelDirRow = QHBoxLayout()
+        self.entryModelDir = QLineEdit(self.frameModelConfig)
+        self.entryModelDir.setReadOnly(True)
+        modelDirRow.addWidget(self.entryModelDir, 1)
+        self.buttonBrowseModelDir = QPushButton('浏览…', self.frameModelConfig)
+        self.buttonBrowseModelDir.clicked.connect(self.buttonBrowseModelDir_click)
+        modelDirRow.addWidget(self.buttonBrowseModelDir)
+        self.buttonRescanModels = QPushButton('重新扫描', self.frameModelConfig)
+        self.buttonRescanModels.clicked.connect(self.rescanModels)
+        modelDirRow.addWidget(self.buttonRescanModels)
+        modelLayout.addLayout(modelDirRow)
+        # 处理中/下载中禁用，防止任务运行中换目录导致引擎 -m 参数指向失效
+        self.modelDirWidgets = (self.entryModelDir, self.buttonBrowseModelDir, self.buttonRescanModels)
+
+        # 安装状态：对照下载清单统计，由 updateModelStatus() 统一刷新
+        self.labelModelStatus = QLabel('', self.frameModelConfig)
+        modelLayout.addWidget(self.labelModelStatus)
+
+        self.buttonDownloadAllModels = QPushButton('一键下载全部模型', self.frameModelConfig)
+        self.buttonDownloadAllModels.clicked.connect(self.buttonDownloadAllModels_click)
+        modelLayout.addWidget(self.buttonDownloadAllModels)
+        self.labelDownloadStatus = QLabel('', self.frameModelConfig)
+        modelLayout.addWidget(self.labelDownloadStatus)
+        # 进度条与取消按钮仅下载中显示，避免平时占位
+        self.progressBarDownload = QProgressBar(self.frameModelConfig, minimum=0, maximum=100)
+        self.progressBarDownload.setVisible(False)
+        modelLayout.addWidget(self.progressBarDownload)
+        self.buttonCancelDownload = QPushButton('取消下载', self.frameModelConfig)
+        self.buttonCancelDownload.setVisible(False)
+        self.buttonCancelDownload.clicked.connect(self.downloadCancelEvent.set)
+        modelLayout.addWidget(self.buttonCancelDownload)
+        modelLayout.addStretch(1)
 
         # ---- 关于 ----
         self.frameAbout = QWidget(self)
@@ -383,6 +417,7 @@ class REGUIApp(QMainWindow):
         aboutLayout.addStretch(1)
 
         self.notebookConfig.addTab(self.frameBasicConfig, '基本设定')
+        self.notebookConfig.addTab(self.frameModelConfig, '模型设定')
         self.notebookConfig.addTab(self.frameAdvancedConfig, '高级设定')
         self.notebookConfig.addTab(self.frameAbout, '关于')
 
@@ -428,6 +463,7 @@ class REGUIApp(QMainWindow):
         self.checkDarkMode.setChecked(c.get('Theme', fallback='Light') == 'Dark')
         self.entryModelDir.setText(self.currentModelDir())
         self.entryCustomCommand.setText(c.get('CustomCommand'))
+        self.updateModelStatus()
 
         self.updateProcessButton()
         self.comboTileSize.setCurrentIndex(c.getint('TileSizeIndex'))
@@ -445,8 +481,10 @@ class REGUIApp(QMainWindow):
         self.buttonProcess.setText(('继续' if self.processingPaused else '暂停') if self.processing else '开始')
         self.setButtonAccent(self.buttonProcess, not (self.processing and not self.processingPaused))
         self.buttonStop.setEnabled(self.processing and not self.cancelEvent.is_set())
+        # 模型目录与一键下载：超分处理中与下载中均禁用（互斥）
         for w in self.modelDirWidgets:
-            w.setEnabled(not self.processing)
+            w.setEnabled(not self.processing and not self.downloadingModels)
+        self.buttonDownloadAllModels.setEnabled(not self.processing and not self.downloadingModels)
 
     def buttonBrowseModelDir_click(self):
         p = QFileDialog.getExistingDirectory(self, dir=self.entryModelDir.text())
@@ -462,10 +500,73 @@ class REGUIApp(QMainWindow):
         models = scan_models(modelDir)
         self.setModels(models)
         self.entryModelDir.setText(modelDir)
+        self.updateModelStatus()
         if models:
             self.writeToOutput(f'模型目录：{modelDir}（扫到 {len(models)} 个模型）\n')
         else:
             self.writeToOutput(f'模型目录：{modelDir}（未扫到任何模型，请下载或手动放置成对的 .bin/.param 后重新扫描）\n')
+
+    def updateModelStatus(self):
+        """刷新「模型设定」页的安装状态行：清单内模型命中当前扫描结果的数量。"""
+        installed = sum(1 for e in download.MODEL_MANIFEST if e['name'] in self.models)
+        self.labelModelStatus.setText(f'已安装 {installed} / {len(download.MODEL_MANIFEST)} 个模型')
+
+    def setModelDownloading(self, downloading: bool):
+        """一键下载的 UI 互斥：进度条/取消按钮仅下载中显示，目录控件与下载按钮禁用。"""
+        self.downloadingModels = downloading
+        self.buttonCancelDownload.setEnabled(downloading)
+        self.progressBarDownload.setVisible(downloading)
+        self.buttonCancelDownload.setVisible(downloading)
+        if downloading:
+            self.progressBarDownload.setValue(0)
+        self.updateProcessButton()
+
+    def buttonDownloadAllModels_click(self):
+        """一键下载全部模型：已安装（SHA-256 校验通过）的自动跳过，完成后自动重扫。"""
+        destDir = self.currentModelDir()
+        try:
+            os.makedirs(destDir, exist_ok=True)
+        except OSError as ex:
+            return QMessageBox.warning(self, define.APP_TITLE, f'无法创建目录：{destDir}\n{ex}')
+        if not os.access(destDir, os.W_OK):
+            return QMessageBox.warning(self, define.APP_TITLE, f'目录不可写：{destDir}\n请换一个有写权限的目录（如用户目录下）。')
+
+        self.downloadCancelEvent.clear()
+        self.labelDownloadStatus.setText('')
+        self.setModelDownloading(True)
+
+        def run():
+            # 已存在且校验通过的跳过（补漏式），缺失的共用一次批量下载（zip 只拉一次）
+            missing = [e for e in download.MODEL_MANIFEST if not download.model_verified(e, destDir)]
+            skipped = len(download.MODEL_MANIFEST) - len(missing)
+            errors = download.download_models(
+                missing,
+                destDir,
+                lambda n, d, t: self.sigModelDownloadProgress.emit(n, d, t),
+                self.downloadCancelEvent,
+            ) if missing else []
+            self.sigModelDownloadDone.emit(errors, skipped)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def onModelDownloadProgress(self, name: str, done: int, total: int):
+        self.labelDownloadStatus.setText(f'正在下载：{name}')
+        if total:
+            self.progressBarDownload.setValue(round(done * 100 / total))
+
+    def onModelDownloadDone(self, errors: list[str], skipped: int):
+        self.setModelDownloading(False)
+        if self.downloadCancelEvent.is_set():
+            self.labelDownloadStatus.setText('下载已取消，已下载的模型可直接使用。')
+        elif errors:
+            QMessageBox.warning(self, define.APP_TITLE, '部分模型下载失败：\n\n' + '\n\n'.join(errors) + '\n\n已下载的模型可直接使用。')
+            self.labelDownloadStatus.setText('部分模型下载失败，可再次点击重试。')
+        elif skipped == len(download.MODEL_MANIFEST):
+            self.labelDownloadStatus.setText('全部模型已安装，无需下载。')
+        else:
+            self.labelDownloadStatus.setText('全部模型下载完成。')
+        # 无论成败都重扫一次：已下载的模型立即可用
+        self.rescanModels()
 
     def buttonStop_click(self):
         if not self.processing or self.cancelEvent.is_set():
@@ -629,7 +730,7 @@ class REGUIApp(QMainWindow):
                 return QMessageBox.warning(self, define.APP_TITLE, '输出路径不是已存在的目录。')
 
             if not self.models:
-                return QMessageBox.warning(self, define.APP_TITLE, '没有可用的模型。\n请到「高级设定」重新扫描模型目录，或重启程序使用模型下载引导。')
+                return QMessageBox.warning(self, define.APP_TITLE, '没有可用的模型。\n请到「模型设定」一键下载或重新扫描模型目录，或重启程序使用模型下载引导。')
 
             initialConfigParams = self.getConfigParams()
             if initialConfigParams.resizeMode == param.ResizeMode.RATIO and initialConfigParams.resizeModeValue == 1:
@@ -1004,26 +1105,13 @@ class ModelDownloadDialog(QDialog):
         self.setDownloading(True)
 
         def run():
-            # 同一 zip 来源在一次批量下载中只拉取一次
-            zipCache: dict = {}
-            for entry in selected:
-                try:
-                    download.download_model(
-                        entry,
-                        destDir,
-                        lambda n, d, t: self.sigProgress.emit(n, d, t),
-                        self.cancelEvent,
-                        zipCache,
-                    )
-                except download.DownloadCancelled:
-                    break
-                except download.DownloadError as ex:
-                    self.errors.append(str(ex))
-            for p in zipCache.values():
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            # 批量下载逻辑与「模型设定」页一键下载共用（download.download_models）
+            self.errors = download.download_models(
+                selected,
+                destDir,
+                lambda n, d, t: self.sigProgress.emit(n, d, t),
+                self.cancelEvent,
+            )
             self.sigDownloadDone.emit(self.errors)
 
         threading.Thread(target=run, daemon=True).start()
