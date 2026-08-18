@@ -66,6 +66,23 @@ curl -L https://raw.githubusercontent.com/TransparentLC/realesrgan-gui/master/ma
 > [!WARNING]
 > 由于我没有运行 macOS 的设备，因此可能无法处理和 macOS 相关的使用问题。
 
+### 一键打包 Windows 便携版 `realesrgan-gui-windows-x64.zip`
+
+PyInstaller 不支持交叉编译，Windows 包必须在 Windows 上构建。
+
+1. 准备一台 Windows 10/11 x64 设备，安装 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。
+2. 在项目根目录的 PowerShell 中执行一键脚本（自动完成：下载官方 Windows 引擎到 `bin/` → 建 `.venv` 装依赖 → PyInstaller onedir 打包 → 复制引擎入包 → 压 zip）：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File build-windows.ps1
+   ```
+3. 产物为 `dist/realesrgan-gui-windows-x64.zip`，解压后运行 `realesrgan-gui.exe` 即可；首次启动无模型时会引导联网下载模型（网络不可达时可手动从 [Real-ESRGAN Releases](https://github.com/xinntao/Real-ESRGAN/releases) 下载 `.bin/.param` 放入模型目录）。
+
+> [!NOTE]
+> * 请解压到非系统盘的普通目录使用：程序配置 `config.ini` 写在 exe 同级目录，放入 `Program Files` 等只读目录会导致配置保存失败。
+> * 目标机显卡驱动需支持 Vulkan（近十年独显/核显基本都支持）。
+> * 未做代码签名，首次运行可能出现 SmartScreen 提示，属正常现象。
+> * 默认关闭 UPX 压缩以规避杀毒误报；确需压缩可在打包前设 `$env:REGUI_UPX=1`。
+
 ### 相关项目
 
 * 在 Android 上使用 Real-ESRGAN：[tumuyan/RealSR-NCNN-Android](https://github.com/tumuyan/RealSR-NCNN-Android)

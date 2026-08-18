@@ -2,6 +2,10 @@ import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
 
+# Windows 上 UPX 压缩的 exe 被杀毒软件误报率高，默认关闭；
+# 确需压缩时设环境变量 REGUI_UPX=1 显式开启
+USE_UPX = bool(os.environ.get('REGUI_UPX'))
+
 a = Analysis(
     ['core/main.py'],
     datas=[
@@ -60,7 +64,7 @@ if os.environ.get('REGUI_ONEFILE'):
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        upx=USE_UPX,
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
@@ -76,7 +80,7 @@ else:
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        upx=USE_UPX,
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
@@ -89,5 +93,5 @@ else:
         a.datas,
         name='realesrgan-gui',
         strip=False,
-        upx=True,
+        upx=USE_UPX,
     )

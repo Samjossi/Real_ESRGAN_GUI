@@ -10,8 +10,8 @@ AGENTS
 目录说明：
 
 - `core/`：Python 源码（`main.py` 主入口、`task.py`、`define.py`、`param.py`、`download.py` 模型下载器），启动命令 `uv run core/main.py`；根目录另有 `main.py` 启动器（仅转发到 `core/main.py`），也可 `uv run main.py`
-- `bin/`：推理引擎二进制（`realesrgan-ncnn-vulkan`，git 忽略不入库），`define.py` 优先在 `bin/` 探测、兼容程序同级旧布局
+- `bin/`：推理引擎二进制（git 忽略不入库）：Linux/macOS 用 `realesrgan-ncnn-vulkan`，Windows 用 `realesrgan-ncnn-vulkan.exe` 及其 OpenMP 运行库 `vcomp140.dll`（两者须同目录）；`define.py` 优先在 `bin/` 探测、兼容程序同级旧布局
 - `asset/icons/`：图标资源（png/ico/icns/psd），`core/main.py` 与打包配置均从此处引用
-- `asset/packaging/`：打包构建配置（`Info.plist`、两个 build 脚本、两个 `.spec`）
+- `asset/packaging/`：打包构建配置（`Info.plist`、两个 macOS build 脚本、两个 `.spec`）；Windows 一键打包脚本 `build-windows.ps1` 在项目根目录
 - `tests/`：测试脚本（冒烟、退出链路、纯黑探针、主题/迁移验证），从项目根 `uv run tests/xxx.py` 直跑，产物落 `tmp/`，详见 `tests/README.md`
-- 打包时从项目根目录执行，并显式传入 `.spec` 完整路径，例如 `pyinstaller asset/packaging/realesrgan-gui.spec`
+- 打包时从项目根目录执行，并显式传入 `.spec` 完整路径，例如 `pyinstaller asset/packaging/realesrgan-gui.spec`；Windows 便携版用根目录一键脚本 `powershell -ExecutionPolicy Bypass -File build-windows.ps1`（须 Windows 构建机，UPX 默认关、`REGUI_UPX=1` 开启）
